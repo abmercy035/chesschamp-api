@@ -7,7 +7,7 @@ require('dotenv').config();
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
+app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
 app.use(cookieParser());
 
 // Initialize Ably
@@ -17,7 +17,7 @@ app.set('ably', ably);
 console.log('🚀 Ably initialized with key:', process.env.ABLY_API_KEY ? 'Found' : 'Missing');
 
 // MongoDB connection
-mongoose.connect('mongodb://localhost:27017/chesschamp', { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
 	.then(() => console.log('MongoDB connected'))
 	.catch(err => console.error('MongoDB error:', err));
 
