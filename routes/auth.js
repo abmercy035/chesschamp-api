@@ -40,16 +40,28 @@ router.post('/login', async (req, res) => {
 
 		// Improved cookie configuration for cross-origin
 
+
+		const isProduction = process.env.NODE_ENV === 'production';
+		const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
 		const cookieOptions = {
-			httpOnly: false, // Allow frontend to read the cookie
-			sameSite: 'none', // Required for cross-origin requests
-			secure: true, // Required when sameSite=none (even in development)
+			httpOnly: false,
 			path: "/",
 			maxAge: 24 * 60 * 60 * 1000, // 1 day
-			domain: undefined // Let browser handle domain
+			// Production: secure cookies with sameSite none for cross-origin
+			// Development: lax cookies for same-origin
+			...(isProduction ? {
+				sameSite: 'none',
+				secure: true, // Required for production HTTPS
+				domain: undefined // Let browser handle
+			} : {
+				sameSite: 'lax',
+				secure: false // Allow HTTP in development
+			})
 		};
 
-		log({ cookieOptions, tokenLength: token.length }, "Setting cookie");
+
+		log({ cookieOptions, isProduction, isHttps }, "Setting cookie with options");
 
 		res.cookie('token', token, cookieOptions);
 

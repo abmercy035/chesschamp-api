@@ -78,8 +78,7 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 	try {
 		const gameId = req.params.id;
 		const userId = req.user.id;
-
-		log('🎮 User', userId, 'attempting to join game:', gameId);
+		// log('🎮 User', userId, 'attempting to join game:', gameId);
 
 		const game = await Game.findById(gameId)
 			.populate({
@@ -91,16 +90,15 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 				select: '-password -email'
 			});
 
-		log({ game })
 		if (!game) {
 			return res.status(404).json({ error: 'Game not found' });
 		}
 
-		log({
-			status: game.status,
-			host: game.host?._id,
-			opponent: game.opponent?._id || null
-		}, '🎮 Current game state:');
+		// log({
+		// 	status: game.status,
+		// 	host: game.host?._id,
+		// 	opponent: game.opponent?._id || null
+		// }, '🎮 Current game state:');
 
 		// Check if user is already in the game
 		if (game.host._id.toString() === userId) {
@@ -214,6 +212,7 @@ router.get('/:id', verifyToken, async (req, res) => {
 	try {
 		const gameId = req.params.id;
 		const userId = req.user.id;
+console.log({id: req.user.id, _id:req.user._id})
 
 		log('🎮 Getting game details for:', gameId, 'user:', userId);
 
@@ -239,12 +238,14 @@ router.get('/:id', verifyToken, async (req, res) => {
 		if (game.host && game.host._id.toString() === userId) {
 			userRole = 'player';
 			playerColor = 'w'; // white Host
+			console.log("host is w")
 		} else if (game.opponent && game.opponent._id.toString() === userId) {
 			userRole = 'player';
 			playerColor = 'b'; // black for opponent 
+			console.log("host is b")
 		}
 
-		log({ userRole, playerColor }, '🎮 User role determined:');
+		console.log({ userRole, playerColor }, '🎮 User role determined:');
 
 		// Get Ably instance and publish game start notification
 		const ably = req.app.get('ably');
