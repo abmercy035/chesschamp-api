@@ -8,6 +8,11 @@ const router = express.Router();
 // Middleware to verify JWT
 async function verifyToken(req, res, next) {
 	const token = req.cookies.token;
+	// var appCookies = (req?.headers?.cookie?.split(";"));
+	var appCookies = (req?.headers?.cookie);
+
+	console.log(appCookies)
+	console.log(token)
 	if (!token) return res.status(401).json({ error: 'Access denied' });
 
 	try {
@@ -259,10 +264,11 @@ router.get('/:id', verifyToken, async (req, res) => {
 		res.json(response);
 
 		// Notify all players that the game has started
-		await channel.publish('gameStart', {
-			game: response,
-			message: 'Game started! Both players have joined.'
-		});
+		// await channel.publish('gameStart', {
+		// 	game: response,
+		//  
+		// 	message: 'Game started! Both players have joined.'
+		// });
 
 	} catch (error) {
 		console.error('❌ Error getting game:', error);
