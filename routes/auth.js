@@ -3,7 +3,6 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { log } = require('../utils/logger');
 
 // Signup
 router.post('/signup', async (req, res) => {
@@ -30,42 +29,47 @@ router.post('/login', async (req, res) => {
 		const match = await bcrypt.compare(password, user.password);
 		if (!match) return res.status(400).json({ error: 'Invalid credentials' });
 		const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
-		// res.cookie('token', token, {
-		// 	httpOnly: false,
-		// 	sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+
+       // Dynamic cookie configuration based on environment
+        const isProduction = process.env.NODE_ENV === 'production';
+        const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+        
+
+		// // Improved cookie configuration for cross-origin
+		// const cookieOptions = {
+		// 	httpOnly: false, // Allow frontend to read the cookie
+		// 	sameSite: 'none', // Required for cross-origin requests
+		// 	secure: true, // Required when sameSite=none (even in development)
 		// 	path: "/",
-		// 	secure: process.env.NODE_ENV === 'production',
-		// 	maxAge: 24 * 60 * 60 * 1000
-		// });
+		// 	maxAge: 24 * 60 * 60 * 1000, // 1 day
+		// 	domain: undefined // Let browser handle domain
+		// };
 
-		// Improved cookie configuration for cross-origin
+ const cookieOptions = {
+            httpOnly: false,
+            path: "/",
+            maxAge: 24 * 60 * 60 * 1000, // 1 day
+            // Production: secure cookies with sameSite none for cross-origin
+            // Development: lax cookies for same-origin
+            ...(isProduction ? {
+                sameSite: 'none',
+                secure: true, // Required for production HTTPS
+                domain: undefined // Let browser handle
+            } : {
+                sameSite: 'lax',
+                secure: false // Allow HTTP in development
+            })
+        };
+        
+        console.log({ cookieOptions, isProduction, isHttps }, "Setting cookie with options");
+        
+		// console.log({ cookieOptions, tokenLength: token.length }, "Setting cookie");
+    res.cookie('token', token, cookieOptions);
 
-
-		const isProduction = process.env.NODE_ENV === 'production';
-		const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
-
-		const cookieOptions = {
-			httpOnly: false,
-			path: "/",
-			maxAge: 24 * 60 * 60 * 1000, // 1 day
-			// Production: secure cookies with sameSite none for cross-origin
-			// Development: lax cookies for same-origin
-			...(isProduction ? {
-				sameSite: 'none',
-				secure: true, // Required for production HTTPS
-				domain: undefined // Let browser handle
-			} : {
-				sameSite: 'lax',
-				secure: false // Allow HTTP in development
-			})
-		};
-
-
-		log({ cookieOptions, isProduction, isHttps }, "Setting cookie with options");
-
-		res.cookie('token', token, cookieOptions);
-
-		res.json({ message: 'Login successful' });
+        res.json({ 
+            message: 'Login successful',
+            user: { id: user._id, username: user.username },
+        });
 	} catch (err) {
 		res.status(500).json({ error: 'Server error' });
 	}
