@@ -20,33 +20,50 @@ app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
 app.use(cookieParser());
 
 
+// CORS Configuration for both development and production
+const allowedOrigins = [
+    // Development
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    
+    // Production
+    'https://chess-champ.vercel.app',
+    
+    // Backend domain (for same-origin requests)
+    'https://chesschamp-api.onrender.com',
+    
+    // Environment variable
+    process.env.FRONTEND_URL,
+].filter(Boolean);
+
 app.use(cors({
-	origin: (url, callback) => {
-		const accept = [process.env.FRONTEND_URL, "http://localhost:3000", "https://chess-champ.vercel.app"];
-		if (accept.includes(url)) {
-			callback(null, true);
-		} else {
-			callback(new Error('Not allowed by CORS'));
-		}
-	},
-	methods: [
-		'GET', 'POST', 'PUT',
-		'DELETE', 'PATCH', 'HEAD', 'OPTIONS'],
-	allowedHeaders: [
-		'Content-Type', 'Origin', 'X-Requested-With',
-		'Accept', "set-cookie", "Content-Type",
-		"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
-		'x-client-key', 'x-client-token', 'x-client-secret', 'Authorization',
-		// Add Ably-specific headers
-		'withCredentials',
-		'X-Ably-Version',
-		'X-Ably-Lib',
-		'X-Ably-ClientId'
-	],
-	optionsSuccessStatus: 200,
-	credentials: true,
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin) return callback(null, true);
+        
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.log('❌ CORS blocked origin:', origin);
+            console.log('✅ Allowed origins:', allowedOrigins);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type', 
+        'Authorization', 
+        'Origin', 
+        'X-Requested-With', 
+        'Accept',
+        'Cookie',
+        'Set-Cookie'
+    ],
+    credentials: true,
+    optionsSuccessStatus: 200
 }));
 
+// Trust proxy for production (Heroku, Vercel, etc.)
 app.set("trust proxy", 1);
 app.use(function (req, res, next) {
 	res.header("Access-Control-Allow-Origin", process.env.FRONTEND_URL);
