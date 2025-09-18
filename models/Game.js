@@ -2,14 +2,36 @@ const mongoose = require('mongoose');
 const GameSchema = new mongoose.Schema({
 	host: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 	opponent: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-	moves: [{ type: String }],
-	watches: { type: Number },
-	stakedPrice: { type: Number },
+	moves: [{
+		san: { type: String, required: true }, // Standard Algebraic Notation (e.g., "Nf3", "e4")
+		from: { type: String, required: true }, // Source square (e.g., "e2")
+		to: { type: String, required: true }, // Target square (e.g., "e4")
+		piece: { type: String, required: true }, // Moving piece (e.g., "p", "N", "K")
+		captured: { type: String }, // Captured piece if any
+		promotion: { type: String }, // Promotion piece if pawn promotion
+		flags: { type: String }, // Move flags (castling, en passant, etc.)
+		fen: { type: String, required: true }, // Board state after this move
+		timestamp: { type: Date, default: Date.now }
+	}],
+	watches: { type: Number, default: 0 },
+	stakedPrice: { type: Number, default: 50.00 },
 	status: { type: String, enum: ['waiting', 'active', 'finished'], default: 'waiting' },
 	winner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-	fen: { type: String, default: 'start' }, // Forsyth–Edwards Notation for board state
+	winReason: { type: String, enum: ['checkmate', 'timeout', 'resignation', 'stalemate', 'draw'] },
+	fen: { type: String, default: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }, // Starting position
 	turn: { type: String, enum: ['w', 'b'], default: 'w' },
-	timeLeft: { w: Number, b: Number },
+	timeLeft: {
+		w: { type: Number, default: 300 }, // 5 minutes in seconds
+		b: { type: Number, default: 300 }
+	},
+	gameState: {
+		inCheck: { type: Boolean, default: false },
+		inCheckmate: { type: Boolean, default: false },
+		inStalemate: { type: Boolean, default: false },
+		inDraw: { type: Boolean, default: false },
+		insufficientMaterial: { type: Boolean, default: false },
+		inThreefoldRepetition: { type: Boolean, default: false }
+	},
 	createdAt : { type: Date, default: Date.now },
 	updatedAt : { type: Date, default: Date.now }
 });

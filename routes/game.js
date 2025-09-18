@@ -2,6 +2,7 @@ const express = require('express');
 const Game = require('../models/Game');
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
+const { Chess } = require('chess.js'); // Import chess.js for move validation
 const { log } = require('../utils/logger');
 const router = express.Router();
 
@@ -277,12 +278,12 @@ console.log({id: req.user.id, _id:req.user._id})
 	}
 });
 
-// Make a move
+// Make a move with proper chess validation
 router.post('/move/:id', verifyToken, async (req, res) => {
 	try {
 		const gameId = req.params.id;
 		const userId = req.user.id;
-		const { move } = req.body;
+		const { move } = req.body; // Expected format: { from: "e2", to: "e4" } or { san: "e4" }
 
 		console.log('🎮 Move attempt:', { gameId, userId, move });
 
@@ -296,26 +297,123 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 			return res.status(400).json({ error: 'Game is not active' });
 		}
 
-		// Determine if user can move
+		// Initialize chess.js with current game state
+		const chess = new Chess();
+		if (game.fen && game.fen !== 'start') {
+			chess.load(game.fen);
+		}
+
+		// Verify it's the player's turn
+		const currentTurn = chess.turn();
 		let canMove = false;
-		if (game.turn === 'w' && game.host && game.host._id.toString() === userId) {
+		let playerColor = null;
+
+		if (currentTurn === 'w' && game.host && game.host._id.toString() === userId) {
 			canMove = true;
-		} else if (game.turn === 'b' && game.opponent && game.opponent._id.toString() === userId) {
+			playerColor = 'w';
+		} else if (currentTurn === 'b' && game.opponent && game.opponent._id.toString() === userId) {
 			canMove = true;
+			playerColor = 'b';
 		}
 
 		if (!canMove) {
-			return res.status(400).json({ error: 'Not your turn' });
+			return res.status(400).json({
+				error: 'Not your turn',
+				currentTurn: currentTurn,
+				expectedPlayer: currentTurn === 'w' ? 'white (host)' : 'black (opponent)'
+			});
 		}
 
-		// Add move to game
-		game.moves.push(move);
-		game.turn = game.turn === 'w' ? 'b' : 'w'; // Switch turns
+		// Attempt to make the move
+		let moveResult;
+		try {
+			// Support both coordinate moves (from/to) and SAN notation
+			if (move.from && move.to) {
+				moveResult = chess.move({
+					from: move.from,
+					to: move.to,
+					promotion: move.promotion || 'q' // Default to queen promotion
+				});
+			} else if (move.san) {
+				moveResult = chess.move(move.san);
+			} else {
+				return res.status(400).json({
+					error: 'Invalid move format. Use {from: "e2", to: "e4"} or {san: "e4"}'
+				});
+			}
+		} catch (chessError) {
+			return res.status(400).json({
+				error: 'Illegal move',
+				details: chessError.message,
+				currentBoard: chess.ascii()
+			});
+		}
 
+		if (!moveResult) {
+			return res.status(400).json({
+				error: 'Invalid move',
+				currentBoard: chess.ascii()
+			});
+		}
+
+		console.log('✅ Valid move:', moveResult);
+
+		// Create detailed move record
+		const moveRecord = {
+			san: moveResult.san,
+			from: moveResult.from,
+			to: moveResult.to,
+			piece: moveResult.piece,
+			captured: moveResult.captured || null,
+			promotion: moveResult.promotion || null,
+			flags: moveResult.flags,
+			fen: chess.fen(),
+			timestamp: new Date()
+		};
+
+		// Update game state
+		game.moves.push(moveRecord);
+		game.fen = chess.fen();
+		game.turn = chess.turn();
+
+		// Check for game ending conditions
+		const gameState = {
+			inCheck: chess.inCheck(),
+			inCheckmate: chess.isCheckmate(),
+			inStalemate: chess.isStalemate(),
+			inDraw: chess.isDraw(),
+			insufficientMaterial: chess.isInsufficientMaterial(),
+			inThreefoldRepetition: chess.isThreefoldRepetition()
+		};
+
+		game.gameState = gameState;
+
+		// Handle game ending
+		if (gameState.inCheckmate) {
+			game.status = 'finished';
+			game.winner = playerColor === 'w' ? game.host._id : game.opponent._id;
+			game.winReason = 'checkmate';
+			console.log('🏆 Game ended by checkmate, winner:', playerColor);
+		} else if (gameState.inStalemate || gameState.inDraw || gameState.insufficientMaterial || gameState.inThreefoldRepetition) {
+			game.status = 'finished';
+			game.winReason = gameState.inStalemate ? 'stalemate' : 'draw';
+			console.log('🤝 Game ended in draw/stalemate');
+		}
+
+		game.updatedAt = new Date();
 		await game.save();
-		await game.populate('host opponent');
+		await game.populate('host opponent winner');
 
-		console.log('✅ Move made successfully');
+		console.log('✅ Move processed successfully');
+
+		// Prepare response
+		const gameResponse = {
+			...game.toObject(),
+			white: { name: game.host.username },
+			black: { name: game.opponent.username },
+			currentBoard: chess.ascii(), // For debugging
+			legalMoves: chess.moves(), // Available moves for next player
+		};
 
 		// Get Ably instance and publish move
 		const ably = req.app.get('ably');
@@ -323,18 +421,101 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 
 		console.log('📢 Publishing move to channel:', `game-${gameId}`);
 
-		await channel.publish('move', {
+		const moveMessage = {
+			game: gameResponse,
+			move: moveRecord,
+			by: userId,
+			gameState: gameState
+		};
+
+		// If game ended, publish game end event
+		if (game.status === 'finished') {
+			await channel.publish('gameEnd', {
+				game: gameResponse,
+				winner: game.winner ? {
+					id: game.winner._id,
+					username: game.winner.username
+				} : null,
+				reason: game.winReason,
+				finalMove: moveRecord
+			});
+		} else {
+			await channel.publish('move', moveMessage);
+		}
+
+		res.json({
+			message: game.status === 'finished' ?
+				`Game ended: ${game.winReason}` :
+				'Move made successfully',
+			game: gameResponse,
+			moveResult: moveRecord,
+			gameState: gameState
+		});
+
+	} catch (error) {
+		console.error('❌ Error making move:', error);
+		res.status(500).json({ error: 'Failed to make move', details: error.message });
+	}
+});
+
+// Resign from game
+router.post('/resign/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const userId = req.user.id;
+
+		const game = await Game.findById(gameId).populate('host opponent');
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		if (game.status !== 'active') {
+			return res.status(400).json({ error: 'Game is not active' });
+		}
+
+		// Determine who resigned and who wins
+		let resigningPlayer, winner;
+		if (game.host && game.host._id.toString() === userId) {
+			resigningPlayer = 'white';
+			winner = game.opponent;
+		} else if (game.opponent && game.opponent._id.toString() === userId) {
+			resigningPlayer = 'black';
+			winner = game.host;
+		} else {
+			return res.status(400).json({ error: 'You are not a player in this game' });
+		}
+
+		// End the game
+		game.status = 'finished';
+		game.winner = winner._id;
+		game.winReason = 'resignation';
+		game.updatedAt = new Date();
+
+		await game.save();
+		await game.populate('winner');
+
+		console.log(`🏳️ ${resigningPlayer} resigned, ${winner.username} wins`);
+
+		// Publish game end event
+		const ably = req.app.get('ably');
+		const channel = ably.channels.get(`game-${gameId}`);
+
+		await channel.publish('gameEnd', {
 			game: {
 				...game.toObject(),
 				white: { name: game.host.username },
 				black: { name: game.opponent.username }
 			},
-			move,
-			by: userId
+			winner: {
+				id: winner._id,
+				username: winner.username
+			},
+			reason: 'resignation',
+			resigningPlayer: resigningPlayer
 		});
 
 		res.json({
-			message: 'Move made successfully',
+			message: `${resigningPlayer} resigned. ${winner.username} wins!`,
 			game: {
 				...game.toObject(),
 				white: { name: game.host.username },
@@ -343,8 +524,92 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 		});
 
 	} catch (error) {
-		console.error('❌ Error making move:', error);
-		res.status(500).json({ error: 'Failed to make move' });
+		console.error('❌ Error processing resignation:', error);
+		res.status(500).json({ error: 'Failed to resign' });
+	}
+});
+
+// Get legal moves for current position
+router.get('/moves/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const game = await Game.findById(gameId);
+
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		if (game.status !== 'active') {
+			return res.status(400).json({ error: 'Game is not active' });
+		}
+
+		// Initialize chess.js with current game state
+		const chess = new Chess();
+		if (game.fen && game.fen !== 'start') {
+			chess.load(game.fen);
+		}
+
+		const legalMoves = chess.moves({ verbose: true }); // Get detailed move objects
+		const simpleMoves = chess.moves(); // Get simple notation moves
+
+		res.json({
+			currentTurn: chess.turn(),
+			legalMoves: simpleMoves,
+			detailedMoves: legalMoves,
+			gameState: {
+				inCheck: chess.inCheck(),
+				canCastle: {
+					kingside: chess.moves().some(move => move.includes('O-O') && !move.includes('O-O-O')),
+					queenside: chess.moves().some(move => move.includes('O-O-O'))
+				}
+			},
+			currentBoard: chess.ascii()
+		});
+
+	} catch (error) {
+		console.error('❌ Error getting legal moves:', error);
+		res.status(500).json({ error: 'Failed to get legal moves' });
+	}
+});
+
+// Get current board state as 8x8 array (for frontend compatibility)
+router.get('/board/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const game = await Game.findById(gameId);
+
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		// Initialize chess.js with current game state
+		const chess = new Chess();
+		if (game.fen && game.fen !== 'start') {
+			chess.load(game.fen);
+		}
+
+		// Convert chess.js board to 8x8 array format
+		const board = chess.board();
+		const simpleBoard = board.map(row =>
+			row.map(piece => piece ? `${piece.color === 'w' ? piece.type.toUpperCase() : piece.type}` : null)
+		);
+
+		res.json({
+			board: simpleBoard,
+			fen: chess.fen(),
+			turn: chess.turn(),
+			ascii: chess.ascii(),
+			gameState: {
+				inCheck: chess.inCheck(),
+				inCheckmate: chess.isCheckmate(),
+				inStalemate: chess.isStalemate(),
+				inDraw: chess.isDraw()
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error getting board state:', error);
+		res.status(500).json({ error: 'Failed to get board state' });
 	}
 });
 
