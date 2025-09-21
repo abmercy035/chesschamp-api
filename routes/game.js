@@ -4,6 +4,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { Chess } = require('chess.js'); // Import chess.js for move validation
 const { log } = require('../utils/logger');
+const { updateGameResult, recordGameStart } = require('./profile');
 const router = express.Router();
 
 // Middleware to verify JWT
@@ -155,6 +156,9 @@ log(updatedGame)
 
 			console.log('✅ User joined as opponent, game is now active');
 
+			// Record game start for profile tracking
+			await recordGameStart(updatedGame.host._id, updatedGame.opponent._id);
+
 			// Get Ably instance and publish game start notification
 			const ably = req.app.get('ably');
 			const channel = ably.channels.get(`game-${gameId}`);
@@ -258,6 +262,7 @@ console.log({id: req.user.id, _id:req.user._id})
 			...game.toObject(),
 			userRole,
 			playerColor,
+			userId,
 			white: game.host ? { name: game.host.username } : null,
 			black: game.opponent ? { name: game.opponent.username } : null
 		};
@@ -283,9 +288,9 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 	try {
 		const gameId = req.params.id;
 		const userId = req.user.id;
-		const { move } = req.body; // Expected format: { from: "e2", to: "e4" } or { san: "e4" }
+		const { move, timeLeft } = req.body; // Expected format: { from: "e2", to: "e4" } or { san: "e4" }
 
-		console.log('🎮 Move attempt:', { gameId, userId, move });
+		console.log('🎮 Move attempt:', { gameId, userId, move, timeLeft });
 
 		const game = await Game.findById(gameId).populate('host opponent');
 		if (!game) {
@@ -329,11 +334,17 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 		try {
 			// Support both coordinate moves (from/to) and SAN notation
 			if (move.from && move.to) {
-				moveResult = chess.move({
+				const moveOptions = {
 					from: move.from,
-					to: move.to,
-					promotion: move.promotion || 'q' // Default to queen promotion
-				});
+					to: move.to
+				};
+
+				// Only add promotion if it's specified (for pawn promotion moves)
+				if (move.promotion) {
+					moveOptions.promotion = move.promotion;
+				}
+
+				moveResult = chess.move(moveOptions);
 			} else if (move.san) {
 				moveResult = chess.move(move.san);
 			} else {
@@ -394,15 +405,65 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 			game.winner = playerColor === 'w' ? game.host._id : game.opponent._id;
 			game.winReason = 'checkmate';
 			console.log('🏆 Game ended by checkmate, winner:', playerColor);
-		} else if (gameState.inStalemate || gameState.inDraw || gameState.insufficientMaterial || gameState.inThreefoldRepetition) {
+		} else if (
+			gameState.inStalemate ||
+			gameState.inDraw ||
+			gameState.insufficientMaterial ||
+			gameState.inThreefoldRepetition
+		) {
 			game.status = 'finished';
-			game.winReason = gameState.inStalemate ? 'stalemate' : 'draw';
-			console.log('🤝 Game ended in draw/stalemate');
+			if (gameState.inStalemate) {
+				game.winReason = 'stalemate';
+				console.log('🤝 Game ended in stalemate');
+			} else if (gameState.inThreefoldRepetition) {
+				game.winReason = 'threefold';
+				console.log('🤝 Game ended by threefold repetition');
+			} else if (gameState.insufficientMaterial) {
+				game.winReason = 'insufficientMaterial';
+				console.log('🤝 Game ended by insufficient material');
+			} else if (chess.getHalfMoves() >= 100) {
+				game.winReason = 'fiftyMove';
+				console.log('🤝 Game ended by fifty-move rule');
+			} else if (gameState.inDraw) {
+				game.winReason = 'draw';
+				console.log('🤝 Game ended in draw');
+			}
+		}
+
+		// Update timer state if provided
+		if (timeLeft && typeof timeLeft === 'object' && timeLeft.w !== undefined && timeLeft.b !== undefined) {
+			game.timeLeft = timeLeft;
+			console.log('⏰ Updated timer state:', timeLeft);
 		}
 
 		game.updatedAt = new Date();
 		await game.save();
 		await game.populate('host opponent winner');
+
+		// Update player profiles if game is finished
+		if (game.status === 'finished') {
+			console.log('🎯 Game finished, updating player profiles...');
+
+			// Calculate game duration (if startTime exists)
+			let gameDuration = 600; // Default 10 minutes
+			if (game.startTime) {
+				gameDuration = Math.floor((new Date() - game.startTime) / 1000);
+			}
+
+			// Count total moves made
+			const moveCount = game.moves ? game.moves.length : 0;
+
+			if (game.winner) {
+				// Someone won the game
+				const winnerId = game.winner._id || game.winner;
+				const loserId = winnerId.toString() === game.host._id.toString() ? game.opponent._id : game.host._id;
+
+				await updateGameResult(winnerId, loserId, 'win', game.winReason, gameDuration, moveCount);
+			} else {
+				// Game was a draw
+				await updateGameResult(game.host._id, game.opponent._id, 'draw', game.winReason, gameDuration, moveCount);
+			}
+		}
 
 		console.log('✅ Move processed successfully');
 
@@ -496,6 +557,23 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 
 		console.log(`🏳️ ${resigningPlayer} resigned, ${winner.username} wins`);
 
+		// Update player profiles after resignation
+		console.log('🎯 Game ended by resignation, updating player profiles...');
+
+		// Calculate game duration
+		let gameDuration = 300; // Default 5 minutes for resignation
+		if (game.startTime) {
+			gameDuration = Math.floor((new Date() - game.startTime) / 1000);
+		}
+
+		// Count total moves made
+		const moveCount = game.moves ? game.moves.length : 0;
+
+		const winnerId = winner._id;
+		const loserId = resigningPlayer === 'white' ? game.host._id : game.opponent._id;
+
+		await updateGameResult(winnerId, loserId, 'win', 'resignation', gameDuration, moveCount);
+
 		// Publish game end event
 		const ably = req.app.get('ably');
 		const channel = ably.channels.get(`game-${gameId}`);
@@ -526,6 +604,183 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error processing resignation:', error);
 		res.status(500).json({ error: 'Failed to resign' });
+	}
+});
+
+// Offer a draw
+router.post('/offer-draw/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const userId = req.user.id;
+
+		const game = await Game.findById(gameId).populate('host opponent');
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		if (game.status !== 'active') {
+			return res.status(400).json({ error: 'Game is not active' });
+		}
+
+		// Check if user is a player in this game
+		const isHost = game.host && game.host._id.toString() === userId;
+		const isOpponent = game.opponent && game.opponent._id.toString() === userId;
+
+		if (!isHost && !isOpponent) {
+			return res.status(400).json({ error: 'You are not a player in this game' });
+		}
+
+		// Check if there's already a pending draw offer
+		if (game.currentDrawOffer && game.currentDrawOffer.offeredBy) {
+			return res.status(400).json({ error: 'There is already a pending draw offer' });
+		}
+
+		// Create draw offer
+		game.currentDrawOffer = {
+			offeredBy: userId,
+			timestamp: new Date()
+		};
+
+		// Add to draw offers history
+		game.drawOffers.push({
+			offeredBy: userId,
+			timestamp: new Date(),
+			status: 'pending'
+		});
+
+		game.updatedAt = new Date();
+		await game.save();
+		await game.populate('currentDrawOffer.offeredBy');
+
+		console.log(`🤝 Draw offer created by ${isHost ? 'host' : 'opponent'}`);
+
+		// Get Ably instance and publish draw offer
+		const ably = req.app.get('ably');
+		const channel = ably.channels.get(`game-${gameId}`);
+
+		await channel.publish('drawOffer', {
+			game: {
+				...game.toObject(),
+				white: { name: game.host.username },
+				black: { name: game.opponent.username }
+			},
+			offeredBy: {
+				id: userId,
+				username: isHost ? game.host.username : game.opponent.username,
+				color: isHost ? 'white' : 'black'
+			}
+		});
+
+		res.json({
+			message: 'Draw offer sent',
+			drawOffer: game.currentDrawOffer
+		});
+
+	} catch (error) {
+		console.error('❌ Error creating draw offer:', error);
+		res.status(500).json({ error: 'Failed to offer draw' });
+	}
+});
+
+// Respond to a draw offer (accept or decline)
+router.post('/respond-draw/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const userId = req.user.id;
+		const { response } = req.body; // 'accept' or 'decline'
+
+		if (!['accept', 'decline'].includes(response)) {
+			return res.status(400).json({ error: 'Response must be "accept" or "decline"' });
+		}
+
+		const game = await Game.findById(gameId).populate('host opponent currentDrawOffer.offeredBy');
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		if (game.status !== 'active') {
+			return res.status(400).json({ error: 'Game is not active' });
+		}
+
+		// Check if there's a pending draw offer
+		if (!game.currentDrawOffer || !game.currentDrawOffer.offeredBy) {
+			return res.status(400).json({ error: 'No pending draw offer' });
+		}
+
+		// Check if user is the recipient of the draw offer (not the one who offered)
+		if (game.currentDrawOffer.offeredBy._id.toString() === userId) {
+			return res.status(400).json({ error: 'You cannot respond to your own draw offer' });
+		}
+
+		// Check if user is a player in this game
+		const isHost = game.host && game.host._id.toString() === userId;
+		const isOpponent = game.opponent && game.opponent._id.toString() === userId;
+
+		if (!isHost && !isOpponent) {
+			return res.status(400).json({ error: 'You are not a player in this game' });
+		}
+
+		// Update draw offer status in history
+		const pendingOffer = game.drawOffers[game.drawOffers.length - 1];
+		if (pendingOffer && pendingOffer.status === 'pending') {
+			pendingOffer.status = response === 'accept' ? 'accepted' : 'declined';
+		}
+
+		if (response === 'accept') {
+			// Accept draw - end game
+			game.status = 'finished';
+			game.winReason = 'draw';
+			game.currentDrawOffer = {}; // Clear current offer
+
+			console.log('🤝 Draw accepted - game ended');
+		} else {
+			// Decline draw - continue game
+			game.currentDrawOffer = {}; // Clear current offer
+
+			console.log('❌ Draw declined - game continues');
+		}
+
+		game.updatedAt = new Date();
+		await game.save();
+
+		// Get Ably instance and publish draw response
+		const ably = req.app.get('ably');
+		const channel = ably.channels.get(`game-${gameId}`);
+
+		if (response === 'accept') {
+			await channel.publish('gameEnd', {
+				game: {
+					...game.toObject(),
+					white: { name: game.host.username },
+					black: { name: game.opponent.username }
+				},
+				reason: 'draw',
+				message: 'Draw accepted by mutual agreement'
+			});
+		} else {
+			await channel.publish('drawDeclined', {
+				game: {
+					...game.toObject(),
+					white: { name: game.host.username },
+					black: { name: game.opponent.username }
+				},
+				declinedBy: {
+					id: userId,
+					username: isHost ? game.host.username : game.opponent.username,
+					color: isHost ? 'white' : 'black'
+				}
+			});
+		}
+
+		res.json({
+			message: response === 'accept' ? 'Draw accepted - game ended' : 'Draw declined',
+			response: response,
+			gameStatus: game.status
+		});
+
+	} catch (error) {
+		console.error('❌ Error responding to draw offer:', error);
+		res.status(500).json({ error: 'Failed to respond to draw offer' });
 	}
 });
 
@@ -610,6 +865,114 @@ router.get('/board/:id', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error getting board state:', error);
 		res.status(500).json({ error: 'Failed to get board state' });
+	}
+});
+
+// End game due to timeout
+router.post('/timeout/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const userId = req.user.id;
+		const { loserColor } = req.body; // 'w' or 'b'
+
+		const game = await Game.findById(gameId).populate('host opponent');
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		if (game.status !== 'active') {
+			return res.status(400).json({ error: 'Game is not active' });
+		}
+
+		// Verify that the user is part of this game
+		const isHost = game.host && game.host._id.toString() === userId;
+		const isOpponent = game.opponent && game.opponent._id.toString() === userId;
+
+		if (!isHost && !isOpponent) {
+			return res.status(400).json({ error: 'You are not a player in this game' });
+		}
+
+		// Determine winner and loser
+		let winner, loser;
+		if (loserColor === 'w') {
+			winner = game.opponent;
+			loser = game.host;
+		} else {
+			winner = game.host;
+			loser = game.opponent;
+		}
+
+		// End the game
+		game.status = 'finished';
+		game.winner = winner._id;
+		game.winReason = 'timeout';
+		game.updatedAt = new Date();
+
+		await game.save();
+		await game.populate('winner');
+
+		console.log(`⏰ ${loserColor === 'w' ? 'White' : 'Black'} timed out, ${winner.username} wins`);
+
+		// Update player profiles after timeout
+		console.log('🎯 Game ended by timeout, updating player profiles...');
+
+		// Calculate game duration
+		let gameDuration = 600; // Default 10 minutes
+		if (game.startTime) {
+			gameDuration = Math.floor((new Date() - game.startTime) / 1000);
+		}
+
+		// Count total moves made
+		const moveCount = game.moves ? game.moves.length : 0;
+
+		await updateGameResult(winner._id, loser._id, 'win', 'timeout', gameDuration, moveCount);
+
+		// Publish game end event
+		const ably = req.app.get('ably');
+		const channel = ably.channels.get(`game-${gameId}`);
+
+		await channel.publish('gameEnd', {
+			game: {
+				...game.toObject(),
+				white: { name: game.host.username },
+				black: { name: game.opponent.username }
+			},
+			winner: {
+				id: winner._id,
+				username: winner.username
+			},
+			loser: loserColor,
+			reason: 'timeout'
+		});
+
+		res.json({
+			message: `${loserColor === 'w' ? 'White' : 'Black'} timed out. ${winner.username} wins!`,
+			game: {
+				...game.toObject(),
+				white: { name: game.host.username },
+				black: { name: game.opponent.username }
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error processing timeout:', error);
+		res.status(500).json({ error: 'Failed to process timeout' });
+	}
+});
+
+// Manual cleanup endpoint for stale games
+router.post('/cleanup', verifyToken, async (req, res) => {
+	try {
+		const { cleanupStaleGames } = require('../utils/gameCleanup');
+		const result = await cleanupStaleGames();
+
+		res.json({
+			success: true,
+			...result
+		});
+	} catch (error) {
+		console.error('❌ Error during manual cleanup:', error);
+		res.status(500).json({ error: 'Failed to cleanup games' });
 	}
 });
 

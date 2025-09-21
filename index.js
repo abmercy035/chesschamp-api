@@ -76,13 +76,20 @@ app.use(function (req, res, next) {
 
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-	.then(() => console.log('MongoDB connected'))
+    .then(() => {
+        console.log('MongoDB connected');
+
+        // Start automatic game cleanup service
+        const { startAutomaticCleanup } = require('./utils/gameCleanup');
+        startAutomaticCleanup();
+    })
 	.catch(err => console.error('MongoDB error:', err));
 
 
 // Routes
 app.use('/api/auth', require('./routes/auth.js'));
 app.use('/api/game', require('./routes/game.js'));
+app.use('/api/profile', require('./routes/profile.js'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

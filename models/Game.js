@@ -17,7 +17,7 @@ const GameSchema = new mongoose.Schema({
 	stakedPrice: { type: Number, default: 50.00 },
 	status: { type: String, enum: ['waiting', 'active', 'finished'], default: 'waiting' },
 	winner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-	winReason: { type: String, enum: ['checkmate', 'timeout', 'resignation', 'stalemate', 'draw'] },
+	winReason: { type: String },
 	fen: { type: String, default: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }, // Starting position
 	turn: { type: String, enum: ['w', 'b'], default: 'w' },
 	timeLeft: {
@@ -31,6 +31,15 @@ const GameSchema = new mongoose.Schema({
 		inDraw: { type: Boolean, default: false },
 		insufficientMaterial: { type: Boolean, default: false },
 		inThreefoldRepetition: { type: Boolean, default: false }
+	},
+	drawOffers: [{
+		offeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+		timestamp: { type: Date, default: Date.now },
+		status: { type: String, enum: ['pending', 'accepted', 'declined'], default: 'pending' }
+	}],
+	currentDrawOffer: {
+		offeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+		timestamp: { type: Date }
 	},
 	createdAt : { type: Date, default: Date.now },
 	updatedAt : { type: Date, default: Date.now }
