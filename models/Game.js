@@ -41,6 +41,26 @@ const GameSchema = new mongoose.Schema({
 		offeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 		timestamp: { type: Date }
 	},
+
+	// Ranked game support
+	gameType: { type: String, enum: ['casual', 'ranked'], default: 'casual' },
+	isRanked: { type: Boolean, default: false },
+	eloInfo: {
+		whiteElo: { type: Number },
+		blackElo: { type: Number },
+		eloDifference: { type: Number },
+		eloChange: {
+			white: { type: Number },
+			black: { type: Number }
+		}
+	},
+
+	// Time control
+	timeControl: {
+		initial: { type: Number, default: 300000 }, // 5 minutes in milliseconds
+		increment: { type: Number, default: 0 }     // increment per move in milliseconds
+	},
+
 	createdAt : { type: Date, default: Date.now },
 	updatedAt : { type: Date, default: Date.now }
 });

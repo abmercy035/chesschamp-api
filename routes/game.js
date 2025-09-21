@@ -4,7 +4,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { Chess } = require('chess.js'); // Import chess.js for move validation
 const { log } = require('../utils/logger');
-const { updateGameResult, recordGameStart } = require('./profile');
+const { updateGameResult, recordGameStart, recordDrawOffer, recordResignation } = require('./profile');
 const router = express.Router();
 
 // Middleware to verify JWT
@@ -572,6 +572,9 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 		const winnerId = winner._id;
 		const loserId = resigningPlayer === 'white' ? game.host._id : game.opponent._id;
 
+		// Record resignation in player stats
+		await recordResignation(loserId);
+
 		await updateGameResult(winnerId, loserId, 'win', 'resignation', gameDuration, moveCount);
 
 		// Publish game end event
@@ -647,6 +650,9 @@ router.post('/offer-draw/:id', verifyToken, async (req, res) => {
 			timestamp: new Date(),
 			status: 'pending'
 		});
+
+		// Record draw offer in player stats
+		await recordDrawOffer(userId);
 
 		game.updatedAt = new Date();
 		await game.save();

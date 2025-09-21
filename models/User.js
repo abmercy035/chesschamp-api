@@ -45,6 +45,10 @@ const UserSchema = new mongoose.Schema({
 			totalMoves: { type: Number, default: 0 },
 			averageMovesPerGame: { type: Number, default: 0 },
 
+			// Battle Actions
+			drawsOffered: { type: Number, default: 0 },
+			resignations: { type: Number, default: 0 },
+
 			// Monthly Stats (stored as key-value pairs)
 			monthlyStats: { type: mongoose.Schema.Types.Mixed, default: {} }
 		},

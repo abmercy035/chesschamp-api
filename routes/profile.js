@@ -53,6 +53,8 @@ router.get('/', verifyToken, async (req, res) => {
 				currentLossStreak: 0,
 				totalMoves: 0,
 				averageMovesPerGame: 0,
+				drawsOffered: 0,
+				resignations: 0,
 				monthlyStats: {}
 			},
 			achievements: user.profile?.achievements || {
@@ -121,7 +123,74 @@ router.put('/', verifyToken, async (req, res) => {
 		}
 
 		console.log('✅ Profile updated for user:', user.username);
-		res.json({ message: 'Profile updated successfully' });
+
+		// Return updated profile data to prevent UI blanking
+		res.json({
+			message: 'Profile updated successfully',
+			profile: {
+				username: user.username,
+				displayName: user.profile?.displayName || user.username,
+				avatar: user.profile?.avatar || '♔',
+				joinDate: user.profile?.joinDate || user.createdAt,
+				lastActive: user.profile?.lastActive || user.updatedAt,
+				stats: user.profile?.stats || {
+					gamesPlayed: 0,
+					wins: 0,
+					losses: 0,
+					draws: 0,
+					winRate: 0,
+					winsByCheckmate: 0,
+					winsByTimeout: 0,
+					winsByResignation: 0,
+					drawsByAgreement: 0,
+					drawsByStalemate: 0,
+					drawsByRepetition: 0,
+					totalPlayTime: 0,
+					averageGameTime: 0,
+					fastestWin: null,
+					longestGame: null,
+					currentWinStreak: 0,
+					bestWinStreak: 0,
+					currentLossStreak: 0,
+					totalMoves: 0,
+					averageMovesPerGame: 0,
+					drawsOffered: 0,
+					resignations: 0,
+					monthlyStats: {}
+				},
+				achievements: user.profile?.achievements || {
+					firstWin: false,
+					tenWins: false,
+					hundredWins: false,
+					winStreak5: false,
+					winStreak10: false,
+					fastWinner: false,
+					timemaster: false,
+					survivor: false,
+					drawMaster: false,
+					veteran: false,
+					monthly: false,
+					comeback: false
+				},
+				preferences: user.profile?.preferences || {
+					theme: 'dark',
+					boardStyle: 'classic',
+					pieceStyle: 'traditional',
+					soundEffects: true,
+					showCoordinates: true,
+					highlightMoves: true,
+					autoQueen: false,
+					confirmMoves: false,
+					animationSpeed: 'normal'
+				},
+				ranking: user.profile?.ranking || {
+					elo: 1200,
+					rank: 'Novice',
+					peakElo: 1200,
+					seasonRank: 'Unranked'
+				}
+			}
+		});
 	} catch (error) {
 		console.error('❌ Error updating profile:', error);
 		res.status(500).json({ error: 'Failed to update profile' });
@@ -153,7 +222,74 @@ router.put('/preferences', verifyToken, async (req, res) => {
 		}
 
 		console.log('✅ Preferences updated for user:', user.username);
-		res.json({ message: 'Preferences updated successfully' });
+
+		// Return updated profile data to prevent UI blanking
+		res.json({
+			message: 'Preferences updated successfully',
+			profile: {
+				username: user.username,
+				displayName: user.profile?.displayName || user.username,
+				avatar: user.profile?.avatar || '♔',
+				joinDate: user.profile?.joinDate || user.createdAt,
+				lastActive: user.profile?.lastActive || user.updatedAt,
+				stats: user.profile?.stats || {
+					gamesPlayed: 0,
+					wins: 0,
+					losses: 0,
+					draws: 0,
+					winRate: 0,
+					winsByCheckmate: 0,
+					winsByTimeout: 0,
+					winsByResignation: 0,
+					drawsByAgreement: 0,
+					drawsByStalemate: 0,
+					drawsByRepetition: 0,
+					totalPlayTime: 0,
+					averageGameTime: 0,
+					fastestWin: null,
+					longestGame: null,
+					currentWinStreak: 0,
+					bestWinStreak: 0,
+					currentLossStreak: 0,
+					totalMoves: 0,
+					averageMovesPerGame: 0,
+					drawsOffered: 0,
+					resignations: 0,
+					monthlyStats: {}
+				},
+				achievements: user.profile?.achievements || {
+					firstWin: false,
+					tenWins: false,
+					hundredWins: false,
+					winStreak5: false,
+					winStreak10: false,
+					fastWinner: false,
+					timemaster: false,
+					survivor: false,
+					drawMaster: false,
+					veteran: false,
+					monthly: false,
+					comeback: false
+				},
+				preferences: user.profile?.preferences || {
+					theme: 'dark',
+					boardStyle: 'classic',
+					pieceStyle: 'traditional',
+					soundEffects: true,
+					showCoordinates: true,
+					highlightMoves: true,
+					autoQueen: false,
+					confirmMoves: false,
+					animationSpeed: 'normal'
+				},
+				ranking: user.profile?.ranking || {
+					elo: 1200,
+					rank: 'Novice',
+					peakElo: 1200,
+					seasonRank: 'Unranked'
+				}
+			}
+		});
 	} catch (error) {
 		console.error('❌ Error updating preferences:', error);
 		res.status(500).json({ error: 'Failed to update preferences' });
@@ -196,6 +332,8 @@ router.post('/game-result', verifyToken, async (req, res) => {
 				currentLossStreak: 0,
 				totalMoves: 0,
 				averageMovesPerGame: 0,
+				drawsOffered: 0,
+				resignations: 0,
 				monthlyStats: {}
 			};
 		}
@@ -564,6 +702,8 @@ router.delete('/', verifyToken, async (req, res) => {
 				currentLossStreak: 0,
 				totalMoves: 0,
 				averageMovesPerGame: 0,
+				drawsOffered: 0,
+				resignations: 0,
 				monthlyStats: {}
 			},
 			achievements: {
@@ -1071,7 +1211,171 @@ async function recordGameStart(hostId, opponentId) {
 	}
 }
 
+// Record when a player offers a draw
+async function recordDrawOffer(playerId) {
+	try {
+		console.log('🤝 Recording draw offer for player:', playerId);
+
+		await User.findByIdAndUpdate(
+			playerId,
+			{
+				$inc: { 'profile.stats.drawsOffered': 1 },
+				$set: { 'profile.lastActive': new Date() }
+			}
+		);
+
+		console.log('✅ Draw offer recorded');
+	} catch (error) {
+		console.error('❌ Error recording draw offer:', error);
+	}
+}
+
+// Record when a player resigns from a game
+async function recordResignation(playerId) {
+	try {
+		console.log('🏳️ Recording resignation for player:', playerId);
+
+		await User.findByIdAndUpdate(
+			playerId,
+			{
+				$inc: { 'profile.stats.resignations': 1 },
+				$set: { 'profile.lastActive': new Date() }
+			}
+		);
+
+		console.log('✅ Resignation recorded');
+	} catch (error) {
+		console.error('❌ Error recording resignation:', error);
+	}
+}
+
+// Seasonal Competition Functions
+async function resetSeasonalStats() {
+	try {
+		console.log('🔄 Resetting seasonal stats...');
+
+		const now = new Date();
+		const seasonKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+		// Archive current season stats and reset seasonal rankings
+		await User.updateMany(
+			{},
+			{
+				$set: {
+					'profile.ranking.seasonRank': 'Unranked',
+					[`profile.stats.seasonalArchive.${seasonKey}`]: '$profile.stats.monthlyStats'
+				}
+			}
+		);
+
+		console.log('✅ Seasonal stats reset completed');
+	} catch (error) {
+		console.error('❌ Error resetting seasonal stats:', error);
+	}
+}
+
+// Calculate seasonal rankings based on performance
+async function updateSeasonalRankings() {
+	try {
+		console.log('📊 Updating seasonal rankings...');
+
+		const now = new Date();
+		const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+		// Get top performers this month
+		const players = await User.find({
+			[`profile.stats.monthlyStats.${monthKey}.games`]: { $gte: 10 }
+		}).select('profile');
+
+		// Sort by monthly performance
+		const sortedPlayers = players
+			.map(player => {
+				const monthlyData = player.profile?.stats?.monthlyStats?.[monthKey] || {};
+				return {
+					_id: player._id,
+					monthlyWins: monthlyData.wins || 0,
+					monthlyGames: monthlyData.games || 0,
+					monthlyWinRate: monthlyData.games > 0 ? (monthlyData.wins / monthlyData.games) : 0
+				};
+			})
+			.sort((a, b) => {
+				if (b.monthlyWins !== a.monthlyWins) return b.monthlyWins - a.monthlyWins;
+				return b.monthlyWinRate - a.monthlyWinRate;
+			});
+
+		// Assign seasonal ranks
+		const rankTiers = [
+			{ tier: 'Champion', count: Math.max(1, Math.floor(sortedPlayers.length * 0.01)) },
+			{ tier: 'Master', count: Math.floor(sortedPlayers.length * 0.05) },
+			{ tier: 'Expert', count: Math.floor(sortedPlayers.length * 0.15) },
+			{ tier: 'Advanced', count: Math.floor(sortedPlayers.length * 0.25) },
+			{ tier: 'Intermediate', count: Math.floor(sortedPlayers.length * 0.35) }
+		];
+
+		let rankIndex = 0;
+		for (const { tier, count } of rankTiers) {
+			const playerIds = sortedPlayers.slice(rankIndex, rankIndex + count).map(p => p._id);
+			if (playerIds.length > 0) {
+				await User.updateMany(
+					{ _id: { $in: playerIds } },
+					{ $set: { 'profile.ranking.seasonRank': tier } }
+				);
+			}
+			rankIndex += count;
+		}
+
+		// Remaining players get 'Novice' rank
+		const remainingIds = sortedPlayers.slice(rankIndex).map(p => p._id);
+		if (remainingIds.length > 0) {
+			await User.updateMany(
+				{ _id: { $in: remainingIds } },
+				{ $set: { 'profile.ranking.seasonRank': 'Novice' } }
+			);
+		}
+
+		console.log('✅ Seasonal rankings updated');
+	} catch (error) {
+		console.error('❌ Error updating seasonal rankings:', error);
+	}
+}
+
+// Get seasonal rewards based on rank
+router.get('/seasonal-rewards', verifyToken, async (req, res) => {
+	try {
+		const user = await User.findById(req.user.id);
+		if (!user) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const seasonRank = user.profile?.ranking?.seasonRank || 'Unranked';
+
+		const rewards = {
+			'Champion': { badge: '🏆', title: 'Seasonal Champion', eloBonus: 100 },
+			'Master': { badge: '🥇', title: 'Seasonal Master', eloBonus: 50 },
+			'Expert': { badge: '🥈', title: 'Seasonal Expert', eloBonus: 25 },
+			'Advanced': { badge: '🥉', title: 'Seasonal Advanced', eloBonus: 15 },
+			'Intermediate': { badge: '🏅', title: 'Seasonal Intermediate', eloBonus: 10 },
+			'Novice': { badge: '🔰', title: 'Seasonal Novice', eloBonus: 5 },
+			'Unranked': { badge: '', title: 'Unranked', eloBonus: 0 }
+		};
+
+		res.json({
+			currentRank: seasonRank,
+			reward: rewards[seasonRank],
+			nextSeason: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 1)
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching seasonal rewards:', error);
+		res.status(500).json({ error: 'Failed to fetch rewards' });
+	}
+});
+
 // Export functions for use in game routes
 module.exports = router;
 module.exports.updateGameResult = updateGameResult;
 module.exports.recordGameStart = recordGameStart;
+module.exports.recordDrawOffer = recordDrawOffer;
+module.exports.recordResignation = recordResignation;
+module.exports.resetSeasonalStats = resetSeasonalStats;
+module.exports.updateSeasonalRankings = updateSeasonalRankings;
