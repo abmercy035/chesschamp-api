@@ -7,6 +7,10 @@ const UserSchema = new mongoose.Schema({
 	username: { type: String, required: true, unique: true },
 	password: { type: String, required: true },
 
+	// User Role
+	role: { type: String, enum: ['user', 'admin'], default: 'user' },
+	isAdmin: { type: Boolean, default: false },
+
 	// Profile Data
 	profile: {
 		displayName: { type: String, default: '' },
