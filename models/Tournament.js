@@ -130,7 +130,7 @@ TournamentSchema.methods.canRegister = function () {
 
 // Generate tournament bracket based on type
 TournamentSchema.methods.generateBracket = async function () {
-	const participants = this.participants.filter(p => p.isActive);
+	const participants = this.participants.filter(p => !p.eliminated);
 
 	if (participants.length < 2) {
 		throw new Error('Need at least 2 participants to generate bracket');
@@ -152,7 +152,7 @@ TournamentSchema.methods.generateBracket = async function () {
 TournamentSchema.methods.generateSingleEliminationBracket = function (participants) {
 	// Sort participants by ELO for seeding
 	const seededParticipants = participants.sort((a, b) =>
-		(b.user.profile?.ranking?.elo || 1200) - (a.user.profile?.ranking?.elo || 1200)
+		(b.player.profile?.ranking?.elo || 1200) - (a.player.profile?.ranking?.elo || 1200)
 	);
 
 	// Calculate total rounds needed
@@ -164,8 +164,8 @@ TournamentSchema.methods.generateSingleEliminationBracket = function (participan
 		if (i + 1 < seededParticipants.length) {
 			firstRoundPairings.push({
 				round: 1,
-				white: seededParticipants[i].user,
-				black: seededParticipants[i + 1].user,
+				white: seededParticipants[i].player,
+				black: seededParticipants[i + 1].player,
 				result: 'pending',
 				bracketPosition: Math.floor(i / 2)
 			});
@@ -204,8 +204,8 @@ TournamentSchema.methods.generateRoundRobinBracket = function (participants) {
 			if (player1Index !== player2Index) {
 				roundPairings.push({
 					round: round + 1,
-					white: participants[player1Index].user,
-					black: participants[player2Index].user,
+					white: participants[player1Index].player,
+					black: participants[player2Index].player,
 					result: 'pending'
 				});
 			}
@@ -237,8 +237,8 @@ TournamentSchema.methods.generateSwissBracket = function (participants) {
 		if (i + 1 < shuffledParticipants.length) {
 			firstRoundPairings.push({
 				round: 1,
-				white: shuffledParticipants[i].user,
-				black: shuffledParticipants[i + 1].user,
+				white: shuffledParticipants[i].player,
+				black: shuffledParticipants[i + 1].player,
 				result: 'pending'
 			});
 		}

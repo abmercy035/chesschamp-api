@@ -2,7 +2,63 @@ const express = require('express');
 const router = express.Router();
 const Tournament = require('../models/Tournament');
 const User = require('../models/User');
+const Game = require('../models/Game');
 const { verifyAdmin } = require('../middleware/adminAuth');
+const TournamentNotificationService = require('../utils/tournamentNotifications');
+
+// Get notification service instance
+const getNotificationService = (req) => {
+	const ably = req.app.get('ably');
+	return new TournamentNotificationService(ably);
+};
+
+// Helper function to create tournament games
+const createTournamentGames = async (tournament, round, pairings) => {
+	const games = [];
+
+	// Calculate start times for games (stagger them by 5 minutes)
+	const now = new Date();
+	const startTime = new Date(now.getTime() + (10 * 60 * 1000)); // Start in 10 minutes
+
+	for (let i = 0; i < pairings.length; i++) {
+		const pairing = pairings[i];
+
+		// Skip byes
+		if (!pairing.black) continue;
+
+		// Stagger game start times by 5 minutes
+		const gameStartTime = new Date(startTime.getTime() + (i * 5 * 60 * 1000));
+
+		const game = new Game({
+			host: pairing.white,
+			opponent: pairing.black,
+			gameType: 'tournament',
+			tournament: {
+				id: tournament._id,
+				round: round,
+				matchIndex: i
+			},
+			timeControl: {
+				initial: tournament.timeControl.initial * 1000, // Convert to milliseconds
+				increment: tournament.timeControl.increment * 1000
+			},
+			status: 'waiting',
+			scheduledStartTime: gameStartTime,
+			createdAt: new Date()
+		});
+
+		await game.save();
+
+		// Update the tournament pairing to reference the created game
+		pairing.game = game._id;
+		pairing.result = 'pending';
+		pairing.scheduledStartTime = gameStartTime;
+
+		games.push(game);
+	}
+
+	return games;
+};
 
 // Apply admin verification to all routes in this file
 router.use(verifyAdmin);
@@ -17,8 +73,8 @@ router.get('/tournaments', async (req, res) => {
 		if (type) filter.type = type;
 
 		const tournaments = await Tournament.find(filter)
-			.populate('participants.user', 'username profile.displayName profile.ranking.elo')
-			.populate('createdBy', 'username profile.displayName')
+			.populate('participants.player', 'username profile')
+			.populate('organizer', 'username profile')
 			.sort({ createdAt: -1 })
 			.limit(limit * 1)
 			.skip((page - 1) * limit);
@@ -26,26 +82,38 @@ router.get('/tournaments', async (req, res) => {
 		const total = await Tournament.countDocuments(filter);
 
 		res.json({
-			tournaments: tournaments.map(tournament => ({
-				id: tournament._id,
-				name: tournament.name,
-				description: tournament.description,
-				type: tournament.type,
-				format: tournament.format,
-				status: tournament.status,
-				maxParticipants: tournament.maxParticipants,
-				currentParticipants: tournament.participants.length,
-				participants: tournament.participants,
-				prizePool: tournament.prizePool,
-				registrationDeadline: tournament.registrationDeadline,
-				startDate: tournament.startDate,
-				endDate: tournament.endDate,
-				currentRound: tournament.currentRound,
-				totalRounds: tournament.rounds.length,
-				createdBy: tournament.createdBy,
-				createdAt: tournament.createdAt,
-				settings: tournament.settings
-			})),
+			tournaments: tournaments.map(tournament => {
+				// Calculate total prize pool from the prizePool object
+				let totalPrizePool = 0;
+				if (tournament.prizePool) {
+					const first = parseInt(tournament.prizePool.first?.replace('$', '') || '0');
+					const second = parseInt(tournament.prizePool.second?.replace('$', '') || '0');
+					const third = parseInt(tournament.prizePool.third?.replace('$', '') || '0');
+					totalPrizePool = first + second + third;
+				}
+
+				return {
+					id: tournament._id,
+					name: tournament.name,
+					description: tournament.description,
+					type: tournament.type,
+					format: tournament.format,
+					status: tournament.status,
+					maxParticipants: tournament.maxParticipants,
+					currentParticipants: tournament.participants.length,
+					participants: tournament.participants,
+					prizePool: tournament.prizePool,
+					totalPrizePool, // Calculated total prize pool
+					registrationDeadline: tournament.registrationEnd, // Use correct field name
+					startDate: tournament.startDate,
+					endDate: tournament.endDate,
+					currentRound: tournament.currentRound,
+					totalRounds: tournament.rounds?.length || 0,
+					organizer: tournament.organizer, // Use 'organizer' not 'createdBy'
+					createdAt: tournament.createdAt,
+					settings: tournament.settings
+				};
+			}),
 			pagination: {
 				current: parseInt(page),
 				total: Math.ceil(total / limit),
@@ -104,26 +172,25 @@ router.post('/tournaments', async (req, res) => {
 			type,
 			format: format || 'rapid',
 			maxParticipants,
-			prizePool: prizePool || 0,
-			registrationDeadline: registrationDeadline ? new Date(registrationDeadline) : null,
+			// Convert simple number prizePool to proper structure
+			prizePool: prizePool ? {
+				first: `$${Math.floor(prizePool * 0.5)}`,
+				second: `$${Math.floor(prizePool * 0.3)}`,
+				third: `$${Math.floor(prizePool * 0.2)}`,
+				participation: '$10'
+			} : undefined,
+			registrationEnd: registrationDeadline ? new Date(registrationDeadline) : null,
 			startDate: startDate ? new Date(startDate) : null,
-			settings: {
-				timeControl: settings?.timeControl || '10+5',
-				rated: settings?.rated !== false,
-				requireMinElo: settings?.requireMinElo || false,
-				minElo: settings?.minElo || 0,
-				maxElo: settings?.maxElo || null,
-				allowSpectators: settings?.allowSpectators !== false,
-				...settings
-			},
-			createdBy: req.user._id,
-			status: 'registration'
+			organizer: req.user._id,
+			status: 'registration',
+			// Add settings if the model supports it
+			...(settings && { settings })
 		});
 
 		await tournament.save();
 
 		// Populate created tournament for response
-		await tournament.populate('createdBy', 'username profile.displayName');
+		await tournament.populate('organizer', 'username profile');
 
 		res.status(201).json({
 			message: 'Tournament created successfully',
@@ -137,10 +204,11 @@ router.post('/tournaments', async (req, res) => {
 				maxParticipants: tournament.maxParticipants,
 				currentParticipants: 0,
 				prizePool: tournament.prizePool,
-				registrationDeadline: tournament.registrationDeadline,
+				totalPrizePool: prizePool || 0, // Add total for frontend
+				registrationDeadline: tournament.registrationEnd, // Use correct field name
 				startDate: tournament.startDate,
 				settings: tournament.settings,
-				createdBy: tournament.createdBy,
+				organizer: tournament.organizer, // Use 'organizer' not 'createdBy'
 				createdAt: tournament.createdAt
 			}
 		});
@@ -181,14 +249,21 @@ router.put('/tournaments/:id', async (req, res) => {
 		if (name) tournament.name = name;
 		if (description) tournament.description = description;
 		if (maxParticipants) tournament.maxParticipants = maxParticipants;
-		if (prizePool !== undefined) tournament.prizePool = prizePool;
-		if (registrationDeadline) tournament.registrationDeadline = new Date(registrationDeadline);
+		if (prizePool !== undefined) {
+			tournament.prizePool = prizePool ? {
+				first: `$${Math.floor(prizePool * 0.5)}`,
+				second: `$${Math.floor(prizePool * 0.3)}`,
+				third: `$${Math.floor(prizePool * 0.2)}`,
+				participation: '$10'
+			} : undefined;
+		}
+		if (registrationDeadline) tournament.registrationEnd = new Date(registrationDeadline);
 		if (startDate) tournament.startDate = new Date(startDate);
 		if (settings) tournament.settings = { ...tournament.settings, ...settings };
 
 		await tournament.save();
-		await tournament.populate('createdBy', 'username profile.displayName');
-		await tournament.populate('participants.user', 'username profile.displayName profile.ranking.elo');
+		await tournament.populate('organizer', 'username profile');
+		await tournament.populate('participants.player', 'username profile');
 
 		res.json({
 			message: 'Tournament updated successfully',
@@ -205,7 +280,7 @@ router.put('/tournaments/:id', async (req, res) => {
 router.post('/tournaments/:id/start', async (req, res) => {
 	try {
 		const tournament = await Tournament.findById(req.params.id)
-			.populate('participants.user', 'username profile.displayName profile.ranking.elo');
+			.populate('participants.player', 'username profile');
 
 		if (!tournament) {
 			return res.status(404).json({ message: 'Tournament not found' });
@@ -226,11 +301,19 @@ router.post('/tournaments/:id/start', async (req, res) => {
 		// Generate initial bracket/pairings
 		const brackets = await tournament.generateBracket();
 
+		// Create actual games for the first round
+		const firstRoundPairings = tournament.rounds[0].games;
+		const createdGames = await createTournamentGames(tournament, 1, firstRoundPairings);
+
 		tournament.status = 'active';
 		tournament.actualStartDate = new Date();
 		tournament.currentRound = 1;
 
 		await tournament.save();
+
+		// Send tournament started notifications
+		const notificationService = getNotificationService(req);
+		await notificationService.notifyTournamentStarted(tournament);
 
 		res.json({
 			message: 'Tournament started successfully',
@@ -240,7 +323,8 @@ router.post('/tournaments/:id/start', async (req, res) => {
 				status: tournament.status,
 				currentRound: tournament.currentRound,
 				participants: tournament.participants.length,
-				bracket: brackets
+				bracket: brackets,
+				gamesCreated: createdGames.length
 			}
 		});
 
@@ -318,7 +402,7 @@ router.delete('/tournaments/:id', async (req, res) => {
 router.get('/tournaments/:id/participants', async (req, res) => {
 	try {
 		const tournament = await Tournament.findById(req.params.id)
-			.populate('participants.user', 'username profile.displayName profile.ranking.elo profile.stats');
+			.populate('participants.player', 'username profile');
 
 		if (!tournament) {
 			return res.status(404).json({ message: 'Tournament not found' });
@@ -329,19 +413,19 @@ router.get('/tournaments/:id/participants', async (req, res) => {
 			tournamentName: tournament.name,
 			participants: tournament.participants.map(p => ({
 				user: {
-					id: p.user._id,
-					username: p.user.username,
-					displayName: p.user.profile.displayName,
-					elo: p.user.profile.ranking.elo,
-					gamesPlayed: p.user.profile.stats.gamesPlayed,
-					winRate: p.user.profile.stats.winRate
+					id: p.player._id,
+					username: p.player.username,
+					displayName: p.player.profile?.displayName || p.player.username,
+					elo: p.player.profile?.ranking?.elo || 1200,
+					gamesPlayed: p.player.profile?.stats?.gamesPlayed || 0,
+					winRate: p.player.profile?.stats?.winRate || 0
 				},
 				registeredAt: p.registeredAt,
 				score: p.score,
 				wins: p.wins,
 				losses: p.losses,
 				draws: p.draws,
-				isActive: p.isActive
+				isActive: !p.eliminated
 			}))
 		});
 
@@ -447,6 +531,239 @@ router.post('/tournaments/:id/advance', async (req, res) => {
 		res.status(500).json({ message: 'Server error' });
 	}
 });
+
+// Manual pairing for tournament rounds
+router.post('/tournaments/:id/manual-pair', async (req, res) => {
+	try {
+		const { pairings } = req.body; // Array of {player1Id, player2Id} objects
+		const tournament = await Tournament.findById(req.params.id)
+			.populate('participants.player', 'username profile');
+
+		if (!tournament) {
+			return res.status(404).json({ message: 'Tournament not found' });
+		}
+
+		if (tournament.status !== 'active') {
+			return res.status(400).json({
+				message: 'Tournament must be active for manual pairing'
+			});
+		}
+
+		// Validate pairings
+		const participantIds = tournament.participants.map(p => p.player._id.toString());
+		for (const pairing of pairings) {
+			if (!participantIds.includes(pairing.player1Id) ||
+				!participantIds.includes(pairing.player2Id)) {
+				return res.status(400).json({
+					message: 'Invalid participant in pairing'
+				});
+			}
+		}
+
+		// Create manual round
+		const currentRound = tournament.currentRound || 1;
+		const manualGames = pairings.map(pairing => ({
+			round: currentRound,
+			white: pairing.player1Id,
+			black: pairing.player2Id,
+			result: 'pending',
+			manualPairing: true
+		}));
+
+		// Update tournament with manual round
+		if (!tournament.rounds) tournament.rounds = [];
+		tournament.rounds[currentRound - 1] = { games: manualGames };
+		tournament.currentRound = currentRound;
+
+		await tournament.save();
+
+		res.json({
+			message: 'Manual pairings created successfully',
+			round: currentRound,
+			pairings: manualGames.length
+		});
+
+	} catch (error) {
+		console.error('Manual pairing error:', error);
+		res.status(500).json({ message: 'Server error' });
+	}
+});
+
+// Update participant seeds
+router.put('/tournaments/:id/seeds', async (req, res) => {
+	try {
+		const { seeds } = req.body; // Array of {participantId, seed} objects
+		const tournament = await Tournament.findById(req.params.id);
+
+		if (!tournament) {
+			return res.status(404).json({ message: 'Tournament not found' });
+		}
+
+		if (tournament.status !== 'registration') {
+			return res.status(400).json({
+				message: 'Can only update seeds during registration'
+			});
+		}
+
+		// Update seeds for participants
+		for (const seedUpdate of seeds) {
+			const participant = tournament.participants.find(
+				p => p.player.toString() === seedUpdate.participantId
+			);
+			if (participant) {
+				participant.seed = seedUpdate.seed;
+			}
+		}
+
+		await tournament.save();
+
+		res.json({
+			message: 'Participant seeds updated successfully',
+			updatedSeeds: seeds.length
+		});
+
+	} catch (error) {
+		console.error('Update seeds error:', error);
+		res.status(500).json({ message: 'Server error' });
+	}
+});
+
+// Handle byes (automatically advance players)
+router.post('/tournaments/:id/byes', async (req, res) => {
+	try {
+		const { playerIds, round } = req.body;
+		const tournament = await Tournament.findById(req.params.id);
+
+		if (!tournament) {
+			return res.status(404).json({ message: 'Tournament not found' });
+		}
+
+		// Add bye wins for specified players
+		for (const playerId of playerIds) {
+			const participant = tournament.participants.find(
+				p => p.player.toString() === playerId
+			);
+			if (participant) {
+				participant.wins += 1;
+				participant.score += 1;
+			}
+		}
+
+		await tournament.save();
+
+		res.json({
+			message: 'Byes assigned successfully',
+			byesAssigned: playerIds.length,
+			round: round
+		});
+
+	} catch (error) {
+		console.error('Assign byes error:', error);
+		res.status(500).json({ message: 'Server error' });
+	}
+});
+
+// Reschedule match
+router.put('/tournaments/:id/matches/:matchId/reschedule', async (req, res) => {
+	try {
+		const { tournamentId, matchId } = req.params;
+		const { newDateTime, reason } = req.body;
+
+		const tournament = await Tournament.findById(tournamentId);
+
+		if (!tournament) {
+			return res.status(404).json({ message: 'Tournament not found' });
+		}
+
+		// Find and update the match
+		let matchFound = false;
+		for (const round of tournament.rounds) {
+			const match = round.games.find(game => game._id.toString() === matchId);
+			if (match) {
+				match.scheduledTime = new Date(newDateTime);
+				match.rescheduleReason = reason;
+				match.rescheduled = true;
+				matchFound = true;
+				break;
+			}
+		}
+
+		if (!matchFound) {
+			return res.status(404).json({ message: 'Match not found' });
+		}
+
+		await tournament.save();
+
+		res.json({
+			message: 'Match rescheduled successfully',
+			newDateTime: newDateTime,
+			reason: reason
+		});
+
+	} catch (error) {
+		console.error('Reschedule match error:', error);
+		res.status(500).json({ message: 'Server error' });
+	}
+});
+
+// Get tournament bracket with advanced information
+router.get('/tournaments/:id/bracket', async (req, res) => {
+	try {
+		const tournament = await Tournament.findById(req.params.id)
+			.populate('participants.player', 'username profile')
+			.populate('rounds.games.white', 'username profile')
+			.populate('rounds.games.black', 'username profile');
+
+		if (!tournament) {
+			return res.status(404).json({ message: 'Tournament not found' });
+		}
+
+		// Enhanced bracket information
+		const bracketData = {
+			id: tournament._id,
+			name: tournament.name,
+			type: tournament.type,
+			status: tournament.status,
+			currentRound: tournament.currentRound,
+			totalRounds: tournament.totalRounds,
+			participants: tournament.participants.map(p => ({
+				id: p.player._id,
+				username: p.player.username,
+				displayName: p.player.profile?.displayName || p.player.username,
+				elo: p.player.profile?.ranking?.elo || 1200,
+				seed: p.seed,
+				score: p.score,
+				wins: p.wins,
+				losses: p.losses,
+				draws: p.draws,
+				eliminated: p.eliminated,
+				finalRank: p.finalRank
+			})),
+			rounds: tournament.rounds?.map(round => ({
+				games: round.games.map(game => ({
+					id: game._id,
+					round: game.round,
+					white: game.white,
+					black: game.black,
+					result: game.result,
+					winner: game.winner,
+					scheduledTime: game.scheduledTime,
+					rescheduled: game.rescheduled,
+					rescheduleReason: game.rescheduleReason,
+					manualPairing: game.manualPairing,
+					bracketPosition: game.bracketPosition
+				}))
+			})) || [],
+			settings: tournament.settings
+		};
+
+		res.json({ bracket: bracketData });
+
+	} catch (error) {
+		console.error('Get bracket error:', error);
+		res.status(500).json({ message: 'Server error' });
+	}
+})
 
 // Helper function to check if number is power of 2
 function isPowerOfTwo(n) {

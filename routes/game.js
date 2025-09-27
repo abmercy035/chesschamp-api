@@ -1,11 +1,126 @@
 const express = require('express');
 const Game = require('../models/Game');
 const User = require('../models/User');
+const Tournament = require('../models/Tournament');
 const jwt = require('jsonwebtoken');
 const { Chess } = require('chess.js'); // Import chess.js for move validation
 const { log } = require('../utils/logger');
 const { updateGameResult, recordGameStart, recordDrawOffer, recordResignation } = require('./profile');
 const router = express.Router();
+
+// Function to handle tournament game completion
+const handleTournamentGameCompletion = async (game) => {
+	if (!game.tournament || !game.tournament.id) {
+		console.log('⚠️ No tournament info found for game:', game._id);
+		return;
+	}
+
+	try {
+		console.log('🏆 Starting tournament game completion for:', game._id);
+		console.log('🔍 Tournament ID:', game.tournament.id);
+		console.log('🎯 Round:', game.tournament.round, 'Match Index:', game.tournament.matchIndex);
+
+		const tournament = await Tournament.findById(game.tournament.id);
+		if (!tournament) {
+			console.error('❌ Tournament not found:', game.tournament.id);
+			return;
+		}
+
+		console.log('✅ Tournament found:', tournament.name);
+		console.log('🎯 Game result - Winner:', game.winner ? 'Yes' : 'Draw');
+		console.log('📋 Tournament participants count:', tournament.participants.length);
+
+		// Update the round game result
+		const currentRound = tournament.rounds[game.tournament.round - 1];
+		if (!currentRound) {
+			console.error('❌ Round not found:', game.tournament.round);
+			return;
+		}
+
+		if (!currentRound.games[game.tournament.matchIndex]) {
+			console.error('❌ Match not found in round:', game.tournament.matchIndex);
+			return;
+		}
+
+		const roundGame = currentRound.games[game.tournament.matchIndex];
+		console.log('📊 Current round game before update:', roundGame);
+
+		if (game.winner) {
+			const winnerId = game.winner._id || game.winner;
+			// Check if winner is white (host) or black (opponent)
+			if (winnerId.toString() === game.host._id.toString()) {
+				roundGame.result = 'white';
+			} else {
+				roundGame.result = 'black';
+			}
+		} else {
+			roundGame.result = 'draw';
+		}
+
+		console.log('📊 Updated round game result:', roundGame.result);
+
+		// Update participant scores
+		const updateParticipantScore = (playerId, points) => {
+			console.log('🔍 Looking for participant:', playerId.toString());
+			const participant = tournament.participants.find(p => {
+				const participantId = p.player._id || p.player;
+				return participantId.toString() === playerId.toString();
+			});
+
+			if (participant) {
+				const oldScore = participant.score;
+				participant.score += points;
+				if (points === 1) participant.wins++;
+				else if (points === 0.5) participant.draws++;
+				else participant.losses++;
+
+				console.log('🏅 Updated participant score:', {
+					player: playerId.toString().slice(-6),
+					oldScore: oldScore,
+					newScore: participant.score,
+					pointsAdded: points,
+					wins: participant.wins,
+					draws: participant.draws,
+					losses: participant.losses
+				});
+				return true;
+			} else {
+				console.error('❌ Participant not found for player:', playerId.toString());
+				return false;
+			}
+		};
+
+		let scoresUpdated = false;
+		if (game.winner) {
+			const winnerId = game.winner._id || game.winner;
+			const loserId = winnerId.toString() === game.host._id.toString() ? game.opponent._id : game.host._id;
+			const winnerUpdated = updateParticipantScore(winnerId, 1); // Winner gets 1 point
+			const loserUpdated = updateParticipantScore(loserId, 0);   // Loser gets 0 points
+			scoresUpdated = winnerUpdated && loserUpdated;
+		} else {
+			// Draw - both players get 0.5 points
+			const hostUpdated = updateParticipantScore(game.host._id, 0.5);
+			const opponentUpdated = updateParticipantScore(game.opponent._id, 0.5);
+			scoresUpdated = hostUpdated && opponentUpdated;
+		}
+
+		if (scoresUpdated) {
+			console.log('💾 Saving tournament with updated results...');
+			await tournament.save();
+			console.log('✅ Tournament result updated successfully');
+
+			// Verify the save worked
+			const verifyTournament = await Tournament.findById(game.tournament.id);
+			console.log('🔍 Verification - Round game result:', verifyTournament.rounds[game.tournament.round - 1]?.games[game.tournament.matchIndex]?.result);
+		} else {
+			console.error('❌ Failed to update participant scores - not saving tournament');
+		}
+
+	} catch (error) {
+		console.error('❌ Error updating tournament result:', error);
+		console.error('📋 Error stack:', error.stack);
+	}
+};
 
 // Middleware to verify JWT
 async function verifyToken(req, res, next) {
@@ -105,12 +220,97 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 		// Check if user is already in the game
 		if (game.host._id.toString() === userId) {
 			log('🎮 User is the host');
-			return res.json({ message: 'Already in game as host' });
+
+			// For tournament games, if user is host and game is waiting, allow them to "ready up"
+			if (game.gameType === 'tournament' && game.status === 'waiting') {
+				// Continue to join logic to activate the game if both players are ready
+			} else if (game.status === 'active') {
+				return res.json({
+					message: 'Already in game as host',
+					game: {
+						...game.toObject(),
+						white: { id: game.host._id, username: game.host.username },
+						black: game.opponent ? { id: game.opponent._id, username: game.opponent.username } : null
+					}
+				});
+			} else {
+				return res.json({ message: 'Already in game as host' });
+			}
 		}
-log(game.opponent)
+
 		if (game.opponent && game.opponent._id.toString() === userId) {
 			log('🎮 User is already the opponent');
-			return res.json({ message: 'Already in game as opponent' });
+
+			// For tournament games, if user is opponent and game is waiting, allow them to "ready up"  
+			if (game.gameType === 'tournament' && game.status === 'waiting') {
+				// Continue to join logic to activate the game if both players are ready
+			} else if (game.status === 'active') {
+				return res.json({
+					message: 'Already in game as opponent',
+					game: {
+						...game.toObject(),
+						white: { id: game.host._id, username: game.host.username },
+						black: { id: game.opponent._id, username: game.opponent.username }
+					}
+				});
+			} else {
+				return res.json({ message: 'Already in game as opponent' });
+			}
+		}
+
+		// Special handling for tournament games
+		if (game.gameType === 'tournament') {
+			// Check if user is one of the assigned players
+			if (game.host._id.toString() !== userId && (!game.opponent || game.opponent._id.toString() !== userId)) {
+				return res.status(403).json({
+					error: 'You are not assigned to this tournament match.'
+				});
+			}
+
+			// Check if scheduled start time has been reached
+			if (game.scheduledStartTime && new Date() < new Date(game.scheduledStartTime)) {
+				const timeUntilStart = Math.ceil((new Date(game.scheduledStartTime) - new Date()) / (1000 * 60));
+				return res.status(400).json({
+					error: `Tournament game starts in ${timeUntilStart} minute(s). Please wait.`,
+					scheduledStartTime: game.scheduledStartTime
+				});
+			}
+
+			// Check if the game should be forfeited (5 minutes after scheduled start)
+			if (game.scheduledStartTime) {
+				const fiveMinutesLater = new Date(new Date(game.scheduledStartTime).getTime() + (5 * 60 * 1000));
+				if (new Date() > fiveMinutesLater && game.status === 'waiting') {
+					// Award win to the player who joined (if any) or the first to join now
+					const presentPlayer = game.host._id.toString() === userId ? game.host : game.opponent;
+					const absentPlayer = game.host._id.toString() === userId ? game.opponent : game.host;
+
+					if (presentPlayer && absentPlayer) {
+						// Award automatic win due to no-show
+						game.status = 'finished';
+						game.winner = presentPlayer._id;
+						game.winReason = 'no-show';
+						game.updatedAt = new Date();
+
+						await game.save();
+						await game.populate('winner');
+
+						console.log(`⏰ ${absentPlayer.username} failed to show up, ${presentPlayer.username} wins by forfeit`);
+
+						// Handle tournament completion
+						await handleTournamentGameCompletion(game);
+
+						return res.json({
+							message: `You win by forfeit! ${absentPlayer.username} failed to show up within 5 minutes.`,
+							game: {
+								...game.toObject(),
+								white: { id: game.host._id, username: game.host.username },
+								black: { id: game.opponent._id, username: game.opponent.username }
+							},
+							autoWin: true
+						});
+					}
+				}
+			}
 		}
 
 		// Check if game is already full
@@ -129,32 +329,63 @@ log(game.opponent)
 
 		// Join as opponent
 		try {
-			// First, atomically update the game to prevent race conditions
-			const updatedGame = await Game.findOneAndUpdate(
-				{ _id: gameId, opponent: null }, // Only update if opponent is not set
-				{
-					opponent: userId,
-					status: 'active'
-				},
-				{ new: true } // Return the updated document
-			).populate([
-				{
-					path: 'host',
-					select: '-password -email'
-				},
-				{
-					path: 'opponent',
-					select: '-password -email'
+			let updatedGame;
+
+			if (game.gameType === 'tournament') {
+				// For tournament games, both players are pre-assigned
+				// Just activate the game when a player "joins" (confirms their participation)
+				updatedGame = await Game.findOneAndUpdate(
+					{ _id: gameId, status: 'waiting' },
+					{
+						status: 'active',
+						startTime: new Date(), // Record actual start time
+						updatedAt: new Date()
+					},
+					{ new: true }
+				).populate([
+					{
+						path: 'host',
+						select: '-password -email'
+					},
+					{
+						path: 'opponent',
+						select: '-password -email'
+					}
+				]);
+
+				if (!updatedGame) {
+					return res.status(400).json({ error: 'Game is no longer available' });
 				}
-			]);
-log(updatedGame)
 
-			// If no game was updated, it means the game is already full
-			if (!updatedGame) {
-				return res.status(400).json({ error: 'Game is full' });
+				console.log('✅ Tournament game activated, both players ready');
+			} else {
+				// For regular games, assign opponent and activate
+				updatedGame = await Game.findOneAndUpdate(
+					{ _id: gameId, opponent: null }, // Only update if opponent is not set
+					{
+						opponent: userId,
+						status: 'active',
+						startTime: new Date() // Record actual start time
+					},
+					{ new: true } // Return the updated document
+				).populate([
+					{
+						path: 'host',
+						select: '-password -email'
+					},
+					{
+						path: 'opponent',
+						select: '-password -email'
+					}
+				]);
+
+				// If no game was updated, it means the game is already full
+				if (!updatedGame) {
+					return res.status(400).json({ error: 'Game is full' });
+				}
+
+				console.log('✅ User joined as opponent, game is now active');
 			}
-
-			console.log('✅ User joined as opponent, game is now active');
 
 			// Record game start for profile tracking
 			await recordGameStart(updatedGame.host._id, updatedGame.opponent._id);
@@ -217,7 +448,7 @@ router.get('/:id', verifyToken, async (req, res) => {
 	try {
 		const gameId = req.params.id;
 		const userId = req.user.id;
-console.log({id: req.user.id, _id:req.user._id})
+		console.log({ id: req.user.id, _id: req.user._id })
 
 		log('🎮 Getting game details for:', gameId, 'user:', userId);
 
@@ -444,6 +675,11 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 		if (game.status === 'finished') {
 			console.log('🎯 Game finished, updating player profiles...');
 
+			// Handle tournament game completion
+			if (game.gameType === 'tournament') {
+				await handleTournamentGameCompletion(game);
+			}
+
 			// Calculate game duration (if startTime exists)
 			let gameDuration = 600; // Default 10 minutes
 			if (game.startTime) {
@@ -556,6 +792,11 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 		await game.populate('winner');
 
 		console.log(`🏳️ ${resigningPlayer} resigned, ${winner.username} wins`);
+
+		// Handle tournament game completion
+		if (game.gameType === 'tournament') {
+			await handleTournamentGameCompletion(game);
+		}
 
 		// Update player profiles after resignation
 		console.log('🎯 Game ended by resignation, updating player profiles...');
@@ -749,6 +990,11 @@ router.post('/respond-draw/:id', verifyToken, async (req, res) => {
 		game.updatedAt = new Date();
 		await game.save();
 
+		// Handle tournament game completion for draws
+		if (response === 'accept' && game.gameType === 'tournament') {
+			await handleTournamentGameCompletion(game);
+		}
+
 		// Get Ably instance and publish draw response
 		const ably = req.app.get('ably');
 		const channel = ably.channels.get(`game-${gameId}`);
@@ -919,6 +1165,11 @@ router.post('/timeout/:id', verifyToken, async (req, res) => {
 
 		console.log(`⏰ ${loserColor === 'w' ? 'White' : 'Black'} timed out, ${winner.username} wins`);
 
+		// Handle tournament game completion
+		if (game.gameType === 'tournament') {
+			await handleTournamentGameCompletion(game);
+		}
+
 		// Update player profiles after timeout
 		console.log('🎯 Game ended by timeout, updating player profiles...');
 
@@ -979,6 +1230,105 @@ router.post('/cleanup', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error during manual cleanup:', error);
 		res.status(500).json({ error: 'Failed to cleanup games' });
+	}
+});
+
+// Debug endpoint to test tournament completion
+router.get('/debug-tournament/:gameId', verifyToken, async (req, res) => {
+	try {
+		const game = await Game.findById(req.params.gameId).populate('host opponent winner');
+		if (!game) {
+			return res.status(404).json({ error: 'Game not found' });
+		}
+
+		console.log('🐛 DEBUG: Game info', {
+			id: game._id,
+			status: game.status,
+			winner: game.winner ? game.winner.username : 'No winner',
+			winReason: game.winReason,
+			tournament: game.tournament,
+			gameType: game.gameType
+		});
+
+		if (game.tournament && game.tournament.id) {
+			const tournament = await Tournament.findById(game.tournament.id).populate('participants.player', 'username');
+			console.log('🐛 DEBUG: Tournament info', {
+				id: tournament._id,
+				name: tournament.name,
+				round: game.tournament.round,
+				matchIndex: game.tournament.matchIndex,
+				participants: tournament.participants.map(p => ({
+					username: p.player.username,
+					score: p.score,
+					wins: p.wins,
+					draws: p.draws,
+					losses: p.losses
+				}))
+			});
+		}
+
+		res.json({
+			message: 'Debug info logged to console',
+			gameInfo: {
+				status: game.status,
+				winner: game.winner ? game.winner.username : null,
+				tournament: game.tournament
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Debug error:', error);
+		res.status(500).json({ error: 'Debug failed' });
+	}
+});
+
+// Check for overdue tournament games and award forfeits
+router.post('/check-forfeits', async (req, res) => {
+	try {
+		console.log('🕐 Checking for overdue tournament games...');
+
+		const fiveMinutesAgo = new Date(Date.now() - (5 * 60 * 1000));
+
+		// Find tournament games that are waiting and past their forfeit time
+		const overdueGames = await Game.find({
+			gameType: 'tournament',
+			status: 'waiting',
+			scheduledStartTime: { $lte: fiveMinutesAgo }
+		}).populate('host opponent');
+
+		console.log(`⏰ Found ${overdueGames.length} overdue tournament games`);
+
+		let forfeitsAwarded = 0;
+
+		for (const game of overdueGames) {
+			// Award forfeit win - this is a simplified version, in practice you'd want to check
+			// which player(s) actually attempted to join
+			game.status = 'finished';
+			game.winner = game.host._id; // Default to host win
+			game.winReason = 'forfeit-time';
+			game.updatedAt = new Date();
+
+			await game.save();
+			await game.populate('winner');
+
+			console.log(`⚡ Awarded forfeit win to ${game.host.username} in game ${game._id}`);
+
+			// Handle tournament completion
+			if (game.gameType === 'tournament') {
+				await handleTournamentGameCompletion(game);
+			}
+
+			forfeitsAwarded++;
+		}
+
+		res.json({
+			message: `Checked ${overdueGames.length} overdue games, awarded ${forfeitsAwarded} forfeits`,
+			forfeitsAwarded
+		});
+
+	} catch (error) {
+		console.error('❌ Error checking forfeits:', error);
+		res.status(500).json({ error: 'Failed to check forfeits' });
 	}
 });
 

@@ -27,7 +27,11 @@ router.get('/', verifyToken, async (req, res) => {
 
 		// Return the profile data
 		res.json({
+			id: user._id,
 			username: user.username,
+			email: user.email,
+			role: user.role || 'user',
+			isAdmin: user.isAdmin || false,
 			displayName: user.profile?.displayName || user.username,
 			avatar: user.profile?.avatar || '♔',
 			joinDate: user.profile?.joinDate || user.createdAt,
