@@ -181,7 +181,9 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 
 						console.log(`⏰ ${absentPlayer.username} failed to show up, ${presentPlayer.username} wins by forfeit`);
 
-						// Handle game completion
+						// Handle tournament completion
+						await handleTournamentGameCompletion(game);
+
 						return res.json({
 							message: `You win by forfeit! ${absentPlayer.username} failed to show up within 5 minutes.`,
 							game: {
@@ -873,7 +875,10 @@ router.post('/respond-draw/:id', verifyToken, async (req, res) => {
 		game.updatedAt = new Date();
 		await game.save();
 
-		// Handle game completion for draws
+		// Handle tournament game completion for draws
+		if (response === 'accept' && game.gameType === 'tournament') {
+			await handleTournamentGameCompletion(game);
+		}
 
 		// Get Ably instance and publish draw response
 		const ably = req.app.get('ably');

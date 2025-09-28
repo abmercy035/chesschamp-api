@@ -1,6 +1,5 @@
 const express = require('express');
 const User = require('../models/User');
-const Tournament = require('../models/Tournament');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 
@@ -411,7 +410,10 @@ router.get('/player-rank/:username', verifyToken, async (req, res) => {
 	}
 });
 
-// Tournament Leaderboards
+// Tournament endpoints temporarily disabled
+// All tournament-related routes have been commented out to remove tournament functionality
+
+module.exports = router;
 router.get('/tournaments', verifyToken, async (req, res) => {
 	try {
 		const status = req.query.status || 'active';

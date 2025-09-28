@@ -43,15 +43,8 @@ const GameSchema = new mongoose.Schema({
 	},
 
 	// Ranked game support
-	gameType: { type: String, enum: ['casual', 'ranked', 'tournament'], default: 'casual' },
+	gameType: { type: String, enum: ['casual', 'ranked'], default: 'casual' },
 	isRanked: { type: Boolean, default: false },
-
-	// Tournament support
-	tournament: {
-		id: { type: mongoose.Schema.Types.ObjectId, ref: 'Tournament' },
-		round: { type: Number },
-		matchIndex: { type: Number } // Index of this match in the round
-	},
 
 	eloInfo: {
 		whiteElo: { type: Number },
@@ -68,10 +61,6 @@ const GameSchema = new mongoose.Schema({
 		initial: { type: Number, default: 300000 }, // 5 minutes in milliseconds
 		increment: { type: Number, default: 0 }     // increment per move in milliseconds
 	},
-
-	// Tournament scheduling
-	scheduledStartTime: { type: Date },
-	startTime: { type: Date }, // Actual game start time
 
 	createdAt: { type: Date, default: Date.now },
 	updatedAt: { type: Date, default: Date.now }
