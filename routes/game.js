@@ -3,6 +3,25 @@ const Game = require('../models/Game');
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { Chess } = require('chess.js'); // Import chess.js for move validation
+
+// Helper function to calculate current time remaining based on when turn started
+function calculateCurrentTimeLeft(game) {
+	if (!game.turnStartedAt || game.status !== 'active') {
+		return game.timeLeft; // Return stored time if game not active or no turn start time
+	}
+
+	const now = new Date();
+	const turnStarted = new Date(game.turnStartedAt);
+	const elapsedSeconds = Math.floor((now - turnStarted) / 1000);
+
+	const currentPlayer = game.turn;
+	const updatedTimeLeft = { ...game.timeLeft };
+
+	// Subtract elapsed time from current player's clock
+	updatedTimeLeft[currentPlayer] = Math.max(0, game.timeLeft[currentPlayer] - elapsedSeconds);
+
+	return updatedTimeLeft;
+}
 const { log } = require('../utils/logger');
 const { updateGameResult, recordGameStart, recordDrawOffer, recordResignation } = require('./profile');
 const router = express.Router();
@@ -32,18 +51,18 @@ async function verifyToken(req, res, next) {
 	}
 }
 
-// Get all waiting games (for dashboard) - NEWEST FIRST
+// Get all active games (for dashboard) - NEWEST FIRST
 router.get('/', verifyToken, async (req, res) => {
 	try {
 
-		console.log('🎮 Getting waiting games');
+		console.log('🎮 Getting active games');
 
-		const games = await Game.find()
+		const games = await Game.find({ status: { $in: ['waiting', 'active'] } })
 			.populate('host', 'username')
 			.populate('opponent', 'username')
 			.sort({ createdAt: -1 }); // Sort by newest first
 
-		console.log('🎮 Found', games.length, 'waiting games');
+		console.log('🎮 Found', games.length, 'active games');
 
 		res.json(games);
 
@@ -222,6 +241,8 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 					{
 						status: 'active',
 						startTime: new Date(), // Record actual start time
+						turnStartedAt: new Date(), // Start timing for white's first move
+						lastMoveTimestamp: new Date(),
 						updatedAt: new Date()
 					},
 					{ new: true }
@@ -248,7 +269,9 @@ router.post('/join/:id', verifyToken, async (req, res) => {
 					{
 						opponent: userId,
 						status: 'active',
-						startTime: new Date() // Record actual start time
+						startTime: new Date(), // Record actual start time
+						turnStartedAt: new Date(), // Start timing for white's first move
+						lastMoveTimestamp: new Date()
 					},
 					{ new: true } // Return the updated document
 				).populate([
@@ -372,13 +395,17 @@ router.get('/:id', verifyToken, async (req, res) => {
 		console.log('📢 Publishing game start notification to channel:', `game-${gameId}`);
 
 
+		// Calculate real-time remaining time
+		const currentTimeLeft = calculateCurrentTimeLeft(game);
+
 		const response = {
 			...game.toObject(),
 			userRole,
 			playerColor,
 			userId,
 			white: game.host ? { name: game.host.username } : null,
-			black: game.opponent ? { name: game.opponent.username } : null
+			black: game.opponent ? { name: game.opponent.username } : null,
+			timeLeft: currentTimeLeft // Use calculated time instead of stored time
 		};
 
 		log(response, '🎮 Sending game response:');
@@ -483,6 +510,23 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 
 		console.log('✅ Valid move:', moveResult);
 
+		// Calculate time used for this move
+		const now = new Date();
+		const turnStarted = new Date(game.turnStartedAt || now);
+		const timeUsedForMove = Math.floor((now - turnStarted) / 1000);
+
+		// Update the current player's remaining time
+		const currentPlayer = chess.turn() === 'w' ? 'b' : 'w'; // Player who just moved (opposite of new turn)
+		const updatedTimeLeft = { ...game.timeLeft };
+		updatedTimeLeft[currentPlayer] = Math.max(0, game.timeLeft[currentPlayer] - timeUsedForMove);
+
+		console.log('⏰ Time calculation:', {
+			player: currentPlayer,
+			timeUsedForMove,
+			remainingTime: updatedTimeLeft[currentPlayer],
+			originalTime: game.timeLeft[currentPlayer]
+		});
+
 		// Create detailed move record
 		const moveRecord = {
 			san: moveResult.san,
@@ -493,13 +537,23 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 			promotion: moveResult.promotion || null,
 			flags: moveResult.flags,
 			fen: chess.fen(),
-			timestamp: new Date()
+			timestamp: now,
+			timeUsed: timeUsedForMove // Track time used for this move
 		};
+
+		// Clear any pending draw offer when a move is made
+		if (game.currentDrawOffer && game.currentDrawOffer.offeredBy) {
+			console.log('🤝 Clearing pending draw offer due to move');
+			game.currentDrawOffer = {};
+		}
 
 		// Update game state
 		game.moves.push(moveRecord);
 		game.fen = chess.fen();
 		game.turn = chess.turn();
+		game.timeLeft = updatedTimeLeft;
+		game.turnStartedAt = now; // New player's turn starts now
+		game.lastMoveTimestamp = now;
 
 		// Check for game ending conditions
 		const gameState = {
@@ -544,11 +598,7 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 			}
 		}
 
-		// Update timer state if provided
-		if (timeLeft && typeof timeLeft === 'object' && timeLeft.w !== undefined && timeLeft.b !== undefined) {
-			game.timeLeft = timeLeft;
-			console.log('⏰ Updated timer state:', timeLeft);
-		}
+		// Timer state is now calculated automatically based on actual elapsed time
 
 		game.updatedAt = new Date();
 		await game.save();
@@ -582,6 +632,10 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 				// Game was a draw
 				await updateGameResult(game.host._id, game.opponent._id, 'draw', game.winReason, gameDuration, moveCount);
 			}
+
+			// Delete the finished game after updating profiles
+			await Game.findByIdAndDelete(game._id);
+			console.log('🗑️ Game deleted after completion');
 		}
 
 		console.log('✅ Move processed successfully');
@@ -621,6 +675,11 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 			});
 		} else {
 			await channel.publish('move', moveMessage);
+			// Also publish updated timer state
+			await channel.publish('timeSync', {
+				timeLeft: updatedTimeLeft,
+				turnStartedAt: game.turnStartedAt
+			});
 		}
 
 		res.json({
@@ -629,7 +688,8 @@ router.post('/move/:id', verifyToken, async (req, res) => {
 				'Move made successfully',
 			game: gameResponse,
 			moveResult: moveRecord,
-			gameState: gameState
+			gameState: gameState,
+			gameDeleted: game.status === 'finished'
 		});
 
 	} catch (error) {
@@ -701,6 +761,10 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 
 		await updateGameResult(winnerId, loserId, 'win', 'resignation', gameDuration, moveCount);
 
+		// Delete the finished game
+		await Game.findByIdAndDelete(game._id);
+		console.log('🗑️ Game deleted after resignation');
+
 		// Publish game end event
 		const ably = req.app.get('ably');
 		const channel = ably.channels.get(`game-${gameId}`);
@@ -721,6 +785,7 @@ router.post('/resign/:id', verifyToken, async (req, res) => {
 
 		res.json({
 			message: `${resigningPlayer} resigned. ${winner.username} wins!`,
+			gameDeleted: true,
 			game: {
 				...game.toObject(),
 				white: { name: game.host.username },
@@ -863,6 +928,15 @@ router.post('/respond-draw/:id', verifyToken, async (req, res) => {
 			game.currentDrawOffer = {}; // Clear current offer
 
 			console.log('🤝 Draw accepted - game ended');
+
+			// Update player profiles for draw
+			const gameDuration = game.startTime ? Math.floor((new Date() - game.startTime) / 1000) : 600;
+			const moveCount = game.moves ? game.moves.length : 0;
+			await updateGameResult(game.host._id, game.opponent._id, 'draw', 'draw', gameDuration, moveCount);
+
+			// Delete the finished game
+			await Game.findByIdAndDelete(game._id);
+			console.log('🗑️ Game deleted after draw acceptance');
 		} else {
 			// Decline draw - continue game
 			game.currentDrawOffer = {}; // Clear current offer
@@ -871,7 +945,9 @@ router.post('/respond-draw/:id', verifyToken, async (req, res) => {
 		}
 
 		game.updatedAt = new Date();
-		await game.save();
+		if (response !== 'accept') {
+			await game.save(); // Only save if game wasn't deleted
+		}
 
 		// Handle game completion for draws
 
@@ -907,7 +983,8 @@ router.post('/respond-draw/:id', verifyToken, async (req, res) => {
 		res.json({
 			message: response === 'accept' ? 'Draw accepted - game ended' : 'Draw declined',
 			response: response,
-			gameStatus: game.status
+			gameStatus: game.status,
+			gameDeleted: response === 'accept'
 		});
 
 	} catch (error) {
@@ -1064,6 +1141,10 @@ router.post('/timeout/:id', verifyToken, async (req, res) => {
 
 		await updateGameResult(winner._id, loser._id, 'win', 'timeout', gameDuration, moveCount);
 
+		// Delete the finished game
+		await Game.findByIdAndDelete(game._id);
+		console.log('🗑️ Game deleted after timeout');
+
 		// Publish game end event
 		const ably = req.app.get('ably');
 		const channel = ably.channels.get(`game-${gameId}`);
@@ -1084,6 +1165,7 @@ router.post('/timeout/:id', verifyToken, async (req, res) => {
 
 		res.json({
 			message: `${loserColor === 'w' ? 'White' : 'Black'} timed out. ${winner.username} wins!`,
+			gameDeleted: true,
 			game: {
 				...game.toObject(),
 				white: { name: game.host.username },
@@ -1094,6 +1176,84 @@ router.post('/timeout/:id', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error processing timeout:', error);
 		res.status(500).json({ error: 'Failed to process timeout' });
+	}
+});
+
+// Get current time state and check for timeouts
+router.get('/time-sync/:id', verifyToken, async (req, res) => {
+	try {
+		const gameId = req.params.id;
+		const game = await Game.findById(gameId).populate('host opponent');
+
+		if (!game || game.status !== 'active') {
+			return res.json({ error: 'Game not found or not active' });
+		}
+
+		// Calculate current time left
+		const currentTimeLeft = calculateCurrentTimeLeft(game);
+
+		// Check if current player has run out of time
+		if (currentTimeLeft[game.turn] <= 0) {
+			console.log(`⏰ Time up detected for ${game.turn} player in game ${gameId}`);
+
+			// End game by timeout
+			const winner = game.turn === 'w' ? game.opponent : game.host;
+			const loser = game.turn === 'w' ? game.host : game.opponent;
+
+			game.status = 'finished';
+			game.winner = winner._id;
+			game.winReason = 'timeout';
+			game.timeLeft = currentTimeLeft; // Save final time state
+			game.updatedAt = new Date();
+
+			await game.save();
+			await game.populate('winner');
+
+			// Handle game completion (update profiles, etc.)
+			const gameDuration = Math.floor((new Date() - game.startTime) / 1000);
+			const moveCount = game.moves ? game.moves.length : 0;
+
+			await updateGameResult(winner._id, loser._id, 'win', 'timeout', gameDuration, moveCount);
+
+			// Delete finished game
+			await Game.findByIdAndDelete(game._id);
+			console.log('🗑️ Game deleted after timeout');
+
+			// Publish game end event
+			const ably = req.app.get('ably');
+			const channel = ably.channels.get(`game-${gameId}`);
+
+			await channel.publish('gameEnd', {
+				game: {
+					...game.toObject(),
+					white: { name: game.host.username },
+					black: { name: game.opponent.username }
+				},
+				winner: {
+					id: winner._id,
+					username: winner.username
+				},
+				loser: game.turn,
+				reason: 'timeout'
+			});
+
+			return res.json({
+				gameEnded: true,
+				reason: 'timeout',
+				winner: winner.username,
+				gameDeleted: true
+			});
+		}
+
+		// Return current time state
+		res.json({
+			timeLeft: currentTimeLeft,
+			turnStartedAt: game.turnStartedAt,
+			currentTurn: game.turn
+		});
+	} catch (error) {
+		console.error('❌ Error in time sync:', error);
+		res.status(500).json({ error: 'Failed to sync time' });
 	}
 });
 

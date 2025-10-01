@@ -24,6 +24,9 @@ const GameSchema = new mongoose.Schema({
 		w: { type: Number, default: 300 }, // 5 minutes in seconds
 		b: { type: Number, default: 300 }
 	},
+	// Track when current player's turn started for accurate timing
+	turnStartedAt: { type: Date, default: Date.now },
+	lastMoveTimestamp: { type: Date, default: Date.now },
 	gameState: {
 		inCheck: { type: Boolean, default: false },
 		inCheckmate: { type: Boolean, default: false },

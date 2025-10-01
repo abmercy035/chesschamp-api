@@ -859,6 +859,72 @@ function calculateWinRate(wins, losses, draws) {
 	return Math.round((wins / totalGames) * 100);
 }
 
+// Helper function to create default profile structure
+function getDefaultProfile() {
+	return {
+		displayName: '',
+		avatar: '♔',
+		joinDate: new Date(),
+		lastActive: new Date(),
+		stats: {
+			gamesPlayed: 0,
+			wins: 0,
+			losses: 0,
+			draws: 0,
+			winRate: 0,
+			winsByCheckmate: 0,
+			winsByTimeout: 0,
+			winsByResignation: 0,
+			drawsByAgreement: 0,
+			drawsByStalemate: 0,
+			drawsByRepetition: 0,
+			totalPlayTime: 0,
+			averageGameTime: 0,
+			fastestWin: null,
+			longestGame: null,
+			currentWinStreak: 0,
+			bestWinStreak: 0,
+			currentLossStreak: 0,
+			totalMoves: 0,
+			averageMovesPerGame: 0,
+			drawsOffered: 0,
+			resignations: 0,
+			monthlyStats: {}
+		},
+		achievements: {
+			firstWin: false,
+			tenWins: false,
+			hundredWins: false,
+			winStreak5: false,
+			winStreak10: false,
+			fastWinner: false,
+			timemaster: false,
+			survivor: false,
+			drawMaster: false,
+			veteran: false,
+			monthly: false,
+			comeback: false
+		},
+		preferences: {
+			theme: 'dark',
+			boardStyle: 'classic',
+			pieceStyle: 'traditional',
+			soundEffects: true,
+			showCoordinates: true,
+			highlightMoves: true,
+			autoQueen: false,
+			confirmMoves: false,
+			animationSpeed: 'normal'
+		},
+		ranking: {
+			elo: 1200,
+			rank: 'Novice',
+			peakElo: 1200,
+			seasonRank: 'Unranked'
+		}
+	};
+}
+
 // Update profile stats when a game is completed
 async function updateGameResult(playerId, opponentId, result, winMethod, gameDuration, moveCount) {
 	try {
@@ -876,8 +942,14 @@ async function updateGameResult(playerId, opponentId, result, winMethod, gameDur
 		if (!player.profile) {
 			player.profile = getDefaultProfile();
 		}
+		if (!player.profile.stats) {
+			player.profile.stats = getDefaultProfile().stats;
+		}
 		if (!opponent.profile) {
 			opponent.profile = getDefaultProfile();
+		}
+		if (!opponent.profile.stats) {
+			opponent.profile.stats = getDefaultProfile().stats;
 		}
 
 		// Get current ELO ratings
@@ -1005,11 +1077,36 @@ async function updateGameResult(playerId, opponentId, result, winMethod, gameDur
 		else if (result === 'loss') playerStats.monthlyStats[currentMonth].losses++;
 		else playerStats.monthlyStats[currentMonth].draws++;
 
+		console.log('📊 Updated monthly stats:', {
+			player: player.username,
+			month: currentMonth,
+			monthlyStats: playerStats.monthlyStats[currentMonth]
+		});
+
 		// Update last active time
 		player.profile.lastActive = new Date();
 
+		// Debug: Log player stats before save
+		console.log('🐛 Player stats before save:', {
+			username: player.username,
+			gamesPlayed: playerStats.gamesPlayed,
+			wins: playerStats.wins,
+			losses: playerStats.losses,
+			draws: playerStats.draws,
+			result: result,
+			winMethod: winMethod,
+			currentMonth: currentMonth,
+			monthlyStats: playerStats.monthlyStats
+		});
+
 		// Save player updates
-		await player.save();
+		try {
+			await player.save();
+			console.log('✅ Player profile saved successfully');
+		} catch (saveError) {
+			console.error('❌ Error saving player profile:', saveError);
+			throw saveError;
+		}
 
 		// Do the same for opponent (with opposite result)
 		const opponentResult2 = result === 'win' ? 'loss' : result === 'loss' ? 'win' : 'draw';
@@ -1104,7 +1201,23 @@ async function updateOpponentStats(opponent, result, winMethod, gameDuration, mo
 	else opponentStats.monthlyStats[currentMonth].draws++;
 
 	opponent.profile.lastActive = new Date();
-	await opponent.save();
+
+	// Debug: Log opponent stats before save
+	console.log('🐛 Opponent stats before save:', {
+		username: opponent.username,
+		gamesPlayed: opponentStats.gamesPlayed,
+		wins: opponentStats.wins,
+		losses: opponentStats.losses,
+		monthlyStats: opponentStats.monthlyStats
+	});
+
+	try {
+		await opponent.save();
+		console.log('✅ Opponent profile saved successfully');
+	} catch (saveError) {
+		console.error('❌ Error saving opponent profile:', saveError);
+		throw saveError;
+	}
 }
 
 // Check and unlock achievements based on current stats
@@ -1372,6 +1485,22 @@ router.get('/seasonal-rewards', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error fetching seasonal rewards:', error);
 		res.status(500).json({ error: 'Failed to fetch rewards' });
+	}
+});
+
+// Test endpoint to verify profile updates (can be removed after testing)
+router.post('/test-profile-update', verifyToken, async (req, res) => {
+	try {
+		const { opponentId, result, winMethod } = req.body;
+		const playerId = req.user.id;
+
+		// Test the updateGameResult function
+		await updateGameResult(playerId, opponentId || playerId, result || 'win', winMethod || 'checkmate', 300, 20);
+
+		res.json({ message: 'Profile update test completed' });
+	} catch (error) {
+		console.error('❌ Test profile update failed:', error);
+		res.status(500).json({ error: 'Test failed', details: error.message });
 	}
 });
 
