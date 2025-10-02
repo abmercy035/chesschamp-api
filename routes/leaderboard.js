@@ -27,17 +27,25 @@ router.get('/elo', verifyToken, async (req, res) => {
 		const page = parseInt(req.query.page) || 1;
 		const limit = parseInt(req.query.limit) || 50;
 		const skip = (page - 1) * limit;
+		const country = req.query.country; // New country filter
 
-		console.log('🔍 Fetching ELO leaderboard, page:', page, 'limit:', limit);
+		console.log('🔍 Fetching ELO leaderboard, page:', page, 'limit:', limit, 'country:', country);
 
-		// Get top players by ELO rating (more inclusive query)
-		const players = await User.find({
+		// Build query with country filter if provided
+		let query = {
 			$or: [
 				{ 'profile.stats.gamesPlayed': { $gte: 1 } }, // At least 1 game
 				{ 'profile.ranking.elo': { $gt: 1200 } }      // Or ELO above default
 			]
-		})
-			.select('username profile.displayName profile.avatar profile.ranking profile.stats')
+		};
+
+		if (country && country !== 'All') {
+			query.country = country;
+		}
+
+		// Get top players by ELO rating (more inclusive query)
+		const players = await User.find(query)
+			.select('username country profile.displayName profile.avatar profile.ranking profile.stats')
 			.sort({ 'profile.ranking.elo': -1, 'profile.stats.gamesPlayed': -1 })
 			.limit(limit)
 			.skip(skip);
@@ -80,6 +88,7 @@ router.get('/elo', verifyToken, async (req, res) => {
 			wins: player.profile?.stats?.wins || 0,
 			losses: player.profile?.stats?.losses || 0,
 			winRate: player.profile?.stats?.winRate || 0,
+			country: player.country || 'Unknown',
 			isCurrentUser: req.user ? player._id.toString() === req.user.id : false
 		}));
 
@@ -578,6 +587,26 @@ router.get('/seasonal', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Error fetching seasonal leaderboard:', error);
 		res.status(500).json({ error: 'Failed to fetch seasonal leaderboard' });
+	}
+});
+
+// Get countries for filter dropdown
+router.get('/countries', verifyToken, async (req, res) => {
+	try {
+		const countries = await User.distinct('country', {
+			'profile.stats.gamesPlayed': { $gte: 1 } // Only countries with active players
+		});
+
+		// Sort countries alphabetically
+		const sortedCountries = countries.filter(c => c).sort();
+
+		res.json({
+			success: true,
+			countries: ['All', ...sortedCountries]
+		});
+	} catch (error) {
+		console.error('❌ Error fetching countries:', error);
+		res.status(500).json({ error: 'Failed to fetch countries' });
 	}
 });
 

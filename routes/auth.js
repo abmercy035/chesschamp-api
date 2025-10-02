@@ -7,16 +7,51 @@ const User = require('../models/User');
 // Signup
 router.post('/signup', async (req, res) => {
 	try {
-		const { username, password } = req.body;
-		if (!username || !password) return res.status(400).json({ error: 'Missing fields' });
-		const exists = await User.findOne({ username });
-		if (exists) return res.status(400).json({ error: 'User exists' });
+		const { username, password, email, age, country } = req.body;
+
+		// Validate required fields
+		if (!username || !password || !email || !age || !country) {
+			return res.status(400).json({ error: 'All fields are required: username, password, email, age, country' });
+		}
+
+		// Validate age
+		if (age < 13 || age > 120) {
+			return res.status(400).json({ error: 'Age must be between 13 and 120' });
+		}
+
+		// Check if user with username or email already exists
+		const existingUser = await User.findOne({
+			$or: [{ username }, { email }]
+		});
+		if (existingUser) {
+			if (existingUser.username === username) {
+				return res.status(400).json({ error: 'Username already taken' });
+			}
+			if (existingUser.email === email) {
+				return res.status(400).json({ error: 'Email already registered' });
+			}
+		}
+
 		const hash = await bcrypt.hash(password, 10);
-		const user = new User({ username, password: hash });
+		const user = new User({
+			username,
+			password: hash,
+			email,
+			age,
+			country
+		});
 		await user.save();
-		res.json({ message: 'Signup successful' });
+
+		console.log(`✅ New user registered: ${username} from ${country}, age ${age}`);
+		res.json({ message: 'Registration successful! Please login to continue.' });
 	} catch (err) {
-		res.status(500).json({ error: 'Server error' });
+		console.error('❌ Signup error:', err);
+		if (err.code === 11000) {
+			// Handle duplicate key error
+			const field = Object.keys(err.keyPattern)[0];
+			return res.status(400).json({ error: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists` });
+		}
+		res.status(500).json({ error: 'Server error during registration' });
 	}
 });
 
@@ -32,25 +67,12 @@ router.post('/login', async (req, res) => {
 
        // Dynamic cookie configuration based on environment
         const isProduction = process.env.NODE_ENV === 'production';
-        const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
-        
-
-		// // Improved cookie configuration for cross-origin
-		// const cookieOptions = {
-		// 	httpOnly: false, // Allow frontend to read the cookie
-		// 	sameSite: 'none', // Required for cross-origin requests
-		// 	secure: true, // Required when sameSite=none (even in development)
-		// 	path: "/",
-		// 	maxAge: 24 * 60 * 60 * 1000, // 1 day
-		// 	domain: undefined // Let browser handle domain
-		// };
+		const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
 
  const cookieOptions = {
             httpOnly: false,
             path: "/",
-            maxAge: 24 * 60 * 60 * 1000, // 1 day
-            // Production: secure cookies with sameSite none for cross-origin
-            // Development: lax cookies for same-origin
+		maxAge: 24 * 60 * 60 * 1000 * 7, // 7 days
             ...(isProduction ? {
                 sameSite: 'none',
                 secure: true, // Required for production HTTPS
@@ -72,6 +94,48 @@ router.post('/login', async (req, res) => {
         });
 	} catch (err) {
 		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+// Middleware to verify JWT for protected routes
+async function verifyToken(req, res, next) {
+	const token = req.cookies.token;
+	if (!token) return res.status(401).json({ error: 'Access denied' });
+
+	try {
+		const verified = jwt.verify(token, process.env.JWT_SECRET);
+		if (verified) {
+			const userFound = await User.findOne({ _id: verified.id }).lean();
+			if (userFound) {
+				req.user = { ...verified, ...userFound };
+				next();
+			} else {
+				return res.status(401).json({ error: 'User not found' });
+			}
+		} else {
+			return res.status(401).json({ error: 'Invalid token' });
+		}
+	} catch (error) {
+		res.status(400).json({ error: 'Invalid token' });
+	}
+}
+
+// Get current user info
+router.get('/me', verifyToken, async (req, res) => {
+	try {
+		const user = await User.findById(req.user.id).select('-password');
+		if (!user) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		res.json({
+			_id: user._id,
+			username: user.username,
+			profile: user.profile
+		});
+	} catch (error) {
+		console.error('Error getting user info:', error);
+		res.status(500).json({ error: 'Failed to get user info' });
 	}
 });
 

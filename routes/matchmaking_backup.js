@@ -31,160 +31,163 @@ async function verifyToken(req, res, next) {
 	}
 }
 
-// In-memory matchmaking queue and pending matches
-let matchmakingQueue = [];
-let pendingMatches = new Map(); // matchId -> { player1, player2, createdAt, confirmed: {player1: boolean, player2: boolean} }
+// Find opponent based on ELO matching
+router.post('/matchmake', verifyToken, async (req, res) => {
+	try {
+		const currentUserId = req.user.id;
+		const currentUser = await User.findById(currentUserId);
 
-// Helper function to get ELO tier
-const getEloTier = (elo) => {
-	if (elo >= 2200) return { name: 'Grandmaster', color: 'text-purple-400', bg: 'bg-purple-500/20', icon: '👑' };
-	if (elo >= 2000) return { name: 'Master', color: 'text-yellow-400', bg: 'bg-yellow-500/20', icon: '🏆' };
-	if (elo >= 1800) return { name: 'Expert', color: 'text-red-400', bg: 'bg-red-500/20', icon: '⚔️' };
-	if (elo >= 1600) return { name: 'Advanced', color: 'text-orange-400', bg: 'bg-orange-500/20', icon: '🔥' };
-	if (elo >= 1400) return { name: 'Intermediate', color: 'text-blue-400', bg: 'bg-blue-500/20', icon: '⚡' };
-	if (elo >= 1200) return { name: 'Amateur', color: 'text-green-400', bg: 'bg-green-500/20', icon: '🌟' };
-	if (elo >= 1000) return { name: 'Novice', color: 'text-teal-400', bg: 'bg-teal-500/20', icon: '🚀' };
-	return { name: 'Beginner', color: 'text-slate-400', bg: 'bg-slate-500/20', icon: '🌱' };
-};
+		if (!currentUser) {
+			return res.status(404).json({ error: 'User not found' });
+		}
 
-// Join matchmaking queue
-router.post('/join-queue', verifyToken, async (req, res) => {
+		const currentElo = currentUser.profile.ranking.elo || 1200;
+
+		// Define ELO ranges for matchmaking (more flexible ranges)
+		const eloRanges = [
+			{ min: currentElo - 100, max: currentElo + 100 },   // ±100 ELO (preferred)
+			{ min: currentElo - 200, max: currentElo + 200 },   // ±200 ELO (acceptable)
+			{ min: currentElo - 300, max: currentElo + 300 },   // ±300 ELO (wider)
+			{ min: 800, max: 2800 }                             // Any player (fallback)
+		];
+
+		console.log(`🎯 Matchmaking for ${currentUser.username} (ELO: ${currentElo})`);
+
+		// Try each ELO range until we find a match
+		for (let i = 0; i < eloRanges.length; i++) {
+			const range = eloRanges[i];
+
+			// Find available players in this ELO range
+			let availablePlayers = await User.find({
+				_id: { $ne: currentUserId }, // Exclude current user
+				'profile.ranking.elo': {
+					$gte: range.min,
+					$lte: range.max
+				},
+				// Try to find recently active players (last 24 hours)
+				'profile.lastActive': {
+					$gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Active in last 24 hours
+				}
+			})
+				.select('username profile.ranking.elo profile.displayName profile.avatar profile.lastActive profile.stats.gamesPlayed')
+				.limit(10)
+				.sort({
+					'profile.lastActive': -1,  // Most recently active first
+					'profile.ranking.elo': -1  // Higher ELO first within same activity level
+				});
+
+			// If no recently active players, find any players in this ELO range
+			if (availablePlayers.length === 0) {
+				availablePlayers = await User.find({
+					_id: { $ne: currentUserId }, // Exclude current user
+					'profile.ranking.elo': {
+						$gte: range.min,
+						$lte: range.max
+					}
+				})
+					.select('username profile.ranking.elo profile.displayName profile.avatar profile.lastActive profile.stats.gamesPlayed')
+					.limit(10)
+					.sort({
+						'profile.ranking.elo': -1  // Higher ELO first
+					});
+			}
+
+			if (availablePlayers.length > 0) {
+				// Pick the best match (closest ELO)
+				let bestMatch = availablePlayers[0];
+				let smallestEloDiff = Math.abs(currentElo - bestMatch.profile.ranking.elo);
+
+				for (const player of availablePlayers) {
+					const eloDiff = Math.abs(currentElo - player.profile.ranking.elo);
+					if (eloDiff < smallestEloDiff) {
+						bestMatch = player;
+						smallestEloDiff = eloDiff;
+					}
+				}
+
+				console.log(`✅ Match found: ${bestMatch.username} (ELO: ${bestMatch.profile.ranking.elo}, diff: ${smallestEloDiff})`);
+
+				return res.json({
+					success: true,
+					match: {
+						userId: bestMatch._id,
+						username: bestMatch.username,
+						displayName: bestMatch.profile.displayName || bestMatch.username,
+						avatar: bestMatch.profile.avatar,
+						elo: bestMatch.profile.ranking.elo,
+						eloDifference: smallestEloDiff,
+						gamesPlayed: bestMatch.profile.stats.gamesPlayed,
+						matchQuality: i === 0 ? 'Perfect' : i === 1 ? 'Good' : i === 2 ? 'Fair' : 'Wide'
+					}
+				});
+			}
+		}
+
+		// No matches found
+		console.log(`❌ No matches found for ${currentUser.username}`);
+		return res.json({
+			success: false,
+			message: 'No suitable opponents found. Try again later or create a public game.',
+			suggestion: 'Consider playing against any available player or creating an open game.'
+		});
+
+	} catch (error) {
+		console.error('❌ Matchmaking error:', error);
+		res.status(500).json({ error: 'Failed to find match' });
+	}
+});
+
+// Get matchmaking queue status
+router.get('/queue', verifyToken, async (req, res) => {
 	try {
 		const currentUser = await User.findById(req.user.id);
 		const currentElo = currentUser.profile.ranking.elo || 1200;
 
-		// Check if user is already in queue
-		const existingIndex = matchmakingQueue.findIndex(p => p.userId.toString() === req.user.id);
-		if (existingIndex !== -1) {
-			return res.json({
-				success: true,
-				message: 'Already in matchmaking queue',
-				status: 'waiting',
-				queuePosition: existingIndex + 1,
-				queueSize: matchmakingQueue.length
-			});
-		}
-
-		console.log(`🎯 ${currentUser.username} joining matchmaking queue (ELO: ${currentElo})`);
-
-		// Look for suitable opponent already in queue
+		// Count players in different ELO ranges
 		const ranges = [
-			{ maxDiff: 100, priority: 1 },   // Very close match
-			{ maxDiff: 200, priority: 2 },   // Good match
-			{ maxDiff: 300, priority: 3 }    // Acceptable match
+			{ name: 'Beginner', min: 800, max: 1000 },
+			{ name: 'Novice', min: 1000, max: 1200 },
+			{ name: 'Amateur', min: 1200, max: 1400 },
+			{ name: 'Intermediate', min: 1400, max: 1600 },
+			{ name: 'Advanced', min: 1600, max: 1800 },
+			{ name: 'Expert', min: 1800, max: 2000 },
+			{ name: 'Master', min: 2000, max: 2200 },
+			{ name: 'Grandmaster', min: 2200, max: 2800 }
 		];
 
-		let matchedOpponent = null;
-		for (const range of ranges) {
-			const suitableOpponents = matchmakingQueue.filter(player => {
-				const eloDiff = Math.abs(currentElo - player.elo);
-				return eloDiff <= range.maxDiff;
+		const queueInfo = await Promise.all(ranges.map(async (range) => {
+			// First try to find recently active users (last 24 hours)
+			let count = await User.countDocuments({
+				'profile.ranking.elo': { $gte: range.min, $lte: range.max },
+				'profile.lastActive': {
+					$gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Active in last 24 hours
+				}
 			});
 
-			if (suitableOpponents.length > 0) {
-				// Pick the first suitable opponent (FIFO)
-				matchedOpponent = suitableOpponents[0];
-				break;
+			// If no recent activity, show all users in this ELO range
+			if (count === 0) {
+				count = await User.countDocuments({
+					'profile.ranking.elo': { $gte: range.min, $lte: range.max }
+				});
 			}
-		}
 
-		if (matchedOpponent) {
-			// Remove matched opponent from queue
-			matchmakingQueue = matchmakingQueue.filter(p => p.userId.toString() !== matchedOpponent.userId.toString());
+			return {
+				...range,
+				activePlayersCount: count,
+				isCurrentUserRange: currentElo >= range.min && currentElo <= range.max
+			};
+		}));
 
-			// Create match
-			const matchId = `match-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-			const eloDifference = Math.abs(currentElo - matchedOpponent.elo);
-
-			pendingMatches.set(matchId, {
-				player1: {
-					userId: req.user.id,
-					username: currentUser.username,
-					elo: currentElo,
-					avatar: getEloTier(currentElo).icon
-				},
-				player2: {
-					userId: matchedOpponent.userId,
-					username: matchedOpponent.username,
-					elo: matchedOpponent.elo,
-					avatar: matchedOpponent.avatar
-				},
-				createdAt: new Date(),
-				confirmed: { player1: false, player2: false },
-				eloDifference
-			});
-
-			console.log(`🎉 Match created: ${currentUser.username} vs ${matchedOpponent.username} (${matchId})`);
-
-			// Send real-time notifications to both players
-			const ably = req.app.get('ably');
-
-			// Notify current user (player1)
-			const player1Channel = ably.channels.get(`user-${req.user.id}`);
-			await player1Channel.publish('matchFound', {
-				matchId,
-				opponent: {
-					userId: matchedOpponent.userId,
-					username: matchedOpponent.username,
-					elo: matchedOpponent.elo,
-					avatar: matchedOpponent.avatar
-				},
-				eloDifference,
-				role: 'player1'
-			});
-
-			// Notify matched opponent (player2)
-			const player2Channel = ably.channels.get(`user-${matchedOpponent.userId}`);
-			await player2Channel.publish('matchFound', {
-				matchId,
-				opponent: {
-					userId: req.user.id,
-					username: currentUser.username,
-					elo: currentElo,
-					avatar: getEloTier(currentElo).icon
-				},
-				eloDifference,
-				role: 'player2'
-			});
-
-			console.log(`🔔 Match notifications sent for ${matchId}`);
-
-			return res.json({
-				success: true,
-				status: 'matched',
-				matchId,
-				opponent: {
-					username: matchedOpponent.username,
-					elo: matchedOpponent.elo,
-					avatar: matchedOpponent.avatar
-				},
-				eloDifference,
-				message: 'Match found! Waiting for both players to accept.'
-			});
-		} else {
-			// Add to queue and wait
-			matchmakingQueue.push({
-				userId: req.user.id,
-				username: currentUser.username,
-				elo: currentElo,
-				avatar: getEloTier(currentElo).icon,
-				joinedAt: new Date()
-			});
-
-			console.log(`⏳ ${currentUser.username} added to queue (position ${matchmakingQueue.length})`);
-
-			return res.json({
-				success: true,
-				status: 'waiting',
-				queuePosition: matchmakingQueue.length,
-				queueSize: matchmakingQueue.length,
-				message: `You are #${matchmakingQueue.length} in the queue. Searching for opponents...`
-			});
-		}
+		res.json({
+			success: true,
+			currentUserElo: currentElo,
+			queueInfo,
+			totalActivePlayers: queueInfo.reduce((sum, range) => sum + range.activePlayersCount, 0)
+		});
 
 	} catch (error) {
-		console.error('❌ Queue join error:', error);
-		res.status(500).json({ error: 'Failed to join matchmaking queue' });
+		console.error('❌ Queue status error:', error);
+		res.status(500).json({ error: 'Failed to get queue status' });
 	}
 });
 
@@ -215,7 +218,7 @@ router.post('/confirm-match', verifyToken, async (req, res) => {
 			// Player declined - notify other player and remove match
 			const ably = req.app.get('ably');
 			const otherPlayer = isPlayer1 ? match.player2 : match.player1;
-
+			
 			const otherPlayerChannel = ably.channels.get(`user-${otherPlayer.userId}`);
 			await otherPlayerChannel.publish('matchDeclined', {
 				matchId,
@@ -266,7 +269,7 @@ router.post('/confirm-match', verifyToken, async (req, res) => {
 
 			// Notify both players that game is starting
 			const ably = req.app.get('ably');
-
+			
 			const player1Channel = ably.channels.get(`user-${match.player1.userId}`);
 			const player2Channel = ably.channels.get(`user-${match.player2.userId}`);
 
@@ -358,62 +361,6 @@ router.get('/queue-status', verifyToken, async (req, res) => {
 	} catch (error) {
 		console.error('❌ Queue status error:', error);
 		res.status(500).json({ error: 'Failed to get queue status' });
-	}
-});
-
-// Get matchmaking queue info
-router.get('/queue', verifyToken, async (req, res) => {
-	try {
-		const currentUser = await User.findById(req.user.id);
-		const currentElo = currentUser.profile.ranking.elo || 1200;
-
-		// Count players in different ELO ranges
-		const ranges = [
-			{ name: 'Beginner', min: 800, max: 1000 },
-			{ name: 'Novice', min: 1000, max: 1200 },
-			{ name: 'Amateur', min: 1200, max: 1400 },
-			{ name: 'Intermediate', min: 1400, max: 1600 },
-			{ name: 'Advanced', min: 1600, max: 1800 },
-			{ name: 'Expert', min: 1800, max: 2000 },
-			{ name: 'Master', min: 2000, max: 2200 },
-			{ name: 'Grandmaster', min: 2200, max: 2800 }
-		];
-
-		const queueInfo = await Promise.all(ranges.map(async (range) => {
-			// First try to find recently active users (last 24 hours)
-			let count = await User.countDocuments({
-				'profile.ranking.elo': { $gte: range.min, $lte: range.max },
-				'profile.lastActive': {
-					$gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Active in last 24 hours
-				}
-			});
-
-			// If no recent activity, show all users in this ELO range
-			if (count === 0) {
-				count = await User.countDocuments({
-					'profile.ranking.elo': { $gte: range.min, $lte: range.max }
-				});
-			}
-
-			return {
-				...range,
-				activePlayersCount: count,
-				isCurrentUserRange: currentElo >= range.min && currentElo <= range.max
-			};
-		}));
-
-		res.json({
-			success: true,
-			currentUserElo: currentElo,
-			queueInfo,
-			totalActivePlayers: queueInfo.reduce((sum, range) => sum + range.activePlayersCount, 0),
-			currentQueueSize: matchmakingQueue.length,
-			pendingMatches: pendingMatches.size
-		});
-
-	} catch (error) {
-		console.error('❌ Queue info error:', error);
-		res.status(500).json({ error: 'Failed to get queue info' });
 	}
 });
 
