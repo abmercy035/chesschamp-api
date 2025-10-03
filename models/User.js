@@ -84,8 +84,7 @@ const UserSchema = new mongoose.Schema({
 			showCoordinates: { type: Boolean, default: true },
 			highlightMoves: { type: Boolean, default: true },
 			autoQueen: { type: Boolean, default: false },
-			confirmMoves: { type: Boolean, default: false },
-			animationSpeed: { type: String, default: 'normal' }
+			confirmMoves: { type: Boolean, default: false }
 		},
 
 		// Ranking System
